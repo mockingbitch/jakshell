@@ -46,12 +46,20 @@ impl Completer for ShellHelper {
                     });
                 }
             }
-            for sub in ["clean", "backup", "update", "find", "open", "sysinfo", "theme", "weather", "ip", "help"] {
+            for sub in ["clean", "backup", "update", "find", "open", "sysinfo", "theme", "weather", "ip", "help", "git"] {
                 let full = format!("jak {}", sub);
                 if full.starts_with(frag) {
                     results.push(Pair {
                         display: format!("{} (jak)", full),
                         replacement: full,
+                    });
+                }
+            }
+            for cmd in ["jak git save ", "jak git sync", "jak git wip", "jak git amend", "jak git undo", "jak git uncommit", "jak git publish", "jak git unstage ", "jak git clean-branches", "jak git help"] {
+                if cmd.starts_with(frag) {
+                    results.push(Pair {
+                        display: format!("{} (git)", cmd.trim_end()),
+                        replacement: cmd.to_string(),
                     });
                 }
             }

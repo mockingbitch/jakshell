@@ -13,6 +13,53 @@ pub struct Shell {
     last_status: i32,
     config_dir: PathBuf,
     pub prompt_template: String,
+    pub timing: TimingConfig,
+    pub greeting: GreetingConfig,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct GreetingConfig {
+    /// Bật/tắt toàn bộ banner khi khởi động.
+    pub enabled: bool,
+    /// Có in dòng "Chào buổi …, <user>! Hôm nay là …" không.
+    pub show_greeting: bool,
+    /// Có in mẹo ngẫu nhiên không.
+    pub show_tip: bool,
+    /// Tên hiển thị thay cho $USER (vd "boss", "Jarvis"). Rỗng = lấy $USER.
+    pub name: String,
+}
+
+impl Default for GreetingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_greeting: true,
+            show_tip: true,
+            name: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct TimingConfig {
+    /// Bật/tắt hiển thị thời gian sau mỗi lệnh.
+    pub enabled: bool,
+    /// Chỉ hiện nếu thời gian thực thi >= ngưỡng này (ms). 0 = luôn hiện.
+    pub threshold_ms: u64,
+    /// Nếu true: kèm exit code khi khác 0.
+    pub show_status: bool,
+}
+
+impl Default for TimingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_ms: 0,
+            show_status: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -48,6 +95,8 @@ impl Shell {
             last_status: 0,
             config_dir,
             prompt_template: default_prompt_template(),
+            timing: TimingConfig::default(),
+            greeting: GreetingConfig::default(),
         })
     }
 

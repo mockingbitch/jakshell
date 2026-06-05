@@ -14,6 +14,25 @@ arrow = "❯"
 git_branch_icon = " "
 use_color = true
 
+[timing]
+# Hiển thị thời gian thực thi sau mỗi lệnh
+enabled = true
+# Chỉ hiện nếu thời gian >= ngưỡng này (ms). 0 = luôn hiện.
+# Thử 200 hoặc 500 nếu thấy nhiễu với lệnh nhanh.
+threshold_ms = 0
+# Khi exit code != 0, có in thêm "✗ exit N" không.
+show_status = true
+
+[greeting]
+# Bật toàn bộ banner khi mở shell
+enabled = true
+# Dòng "Chào buổi sáng/trưa/chiều/tối, <tên>! Hôm nay là …"
+show_greeting = true
+# Mẹo ngẫu nhiên
+show_tip = true
+# Tên hiển thị (rỗng = lấy từ $USER)
+name = ""
+
 [aliases]
 ll = "ls -lah"
 la = "ls -A"

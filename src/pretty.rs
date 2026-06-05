@@ -17,7 +17,7 @@ use crate::shell::Shell;
 
 /// Có nên chạy ở chế độ pretty cho lệnh `cmd` này không?
 pub fn supports(cmd: &str) -> bool {
-    matches!(cmd, "ls" | "ps" | "df" | "du")
+    matches!(cmd, "ls" | "ps" | "df" | "du" | "git")
 }
 
 pub fn run(
@@ -30,6 +30,10 @@ pub fn run(
     let use_color = shell.borrow().theme.use_color;
 
     let mut builder = Command::new(cmd);
+    // Với git: ép màu ngay cả khi pipe (vì ta capture stdout)
+    if cmd == "git" {
+        builder.arg("-c").arg("color.ui=always");
+    }
     builder.args(&args);
     builder.current_dir(&shell.borrow().cwd);
 
@@ -53,6 +57,7 @@ pub fn run(
         "ps" => pretty_ps(&text, use_color),
         "df" => pretty_df(&text, use_color),
         "du" => pretty_du(&text, use_color),
+        "git" => pretty_git(&text, &args, use_color),
         _ => {
             // Không có prettifier — in raw
             print!("{}", text);
@@ -494,6 +499,252 @@ fn is_size_token(t: &str) -> bool {
 }
 
 // ─── du ───────────────────────────────────────────────────────────────────────
+
+// ─── git ──────────────────────────────────────────────────────────────────────
+
+fn pretty_git(out: &str, args: &[&str], color: bool) {
+    let sub = args.iter().find(|a| !a.starts_with('-')).copied().unwrap_or("");
+    match sub {
+        "status" => pretty_git_status(out, color),
+        "log" => {
+            // git -c color.ui=always log đã có màu — chỉ in lại
+            print!("{}", out);
+        }
+        "diff" => {
+            // git diff đã đẹp — in lại
+            print!("{}", out);
+        }
+        "branch" => pretty_git_branch(out, color),
+        _ => print!("{}", out),
+    }
+}
+
+fn pretty_git_status(out: &str, color: bool) {
+    // Output `git status` thường có dạng:
+    //   On branch main
+    //   Your branch is up to date with 'origin/main'.
+    //
+    //   Changes to be committed:
+    //     (use "git restore --staged <file>..." to unstage)
+    //         modified:   src/main.rs
+    //         new file:   src/new.rs
+    //
+    //   Changes not staged for commit:
+    //     (use "git add <file>..." to update what will be committed)
+    //         modified:   README.md
+    //         deleted:    old.txt
+    //
+    //   Untracked files:
+    //     (use "git add <file>..." to include in what will be committed)
+    //         temp.log
+    //
+    //   no changes added to commit (...)
+    let mut section: Section = Section::None;
+    for raw in out.lines() {
+        let line = strip_ansi(raw);
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("On branch ") {
+            let br = &trimmed["On branch ".len()..];
+            print_kv(color, "branch", br, CYAN);
+            continue;
+        }
+        if trimmed.starts_with("HEAD detached at ") {
+            let h = &trimmed["HEAD detached at ".len()..];
+            print_kv(color, "HEAD", &format!("(detached) {}", h), MAGENTA);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Your branch is ahead of ") {
+            print_kv(color, "ahead", rest, GREEN);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Your branch is behind ") {
+            print_kv(color, "behind", rest, RED);
+            continue;
+        }
+        if trimmed.starts_with("Your branch is up to date") {
+            print_kv(color, "remote", "up to date", DIM);
+            continue;
+        }
+        if trimmed.starts_with("Your branch and ") && trimmed.contains("diverged") {
+            print_kv(color, "remote", "diverged — cần merge/rebase", YELLOW);
+            continue;
+        }
+
+        if trimmed == "Changes to be committed:" {
+            println!();
+            println!("{bold}{green}● Staged — sẵn sàng commit:{reset}",
+                bold = c(color, BOLD), green = c(color, GREEN), reset = c(color, RESET));
+            section = Section::Staged;
+            continue;
+        }
+        if trimmed == "Changes not staged for commit:" || trimmed.starts_with("Changes not staged") {
+            println!();
+            println!("{bold}{yellow}● Modified — đã sửa, chưa stage:{reset}",
+                bold = c(color, BOLD), yellow = c(color, YELLOW), reset = c(color, RESET));
+            section = Section::Modified;
+            continue;
+        }
+        if trimmed == "Untracked files:" {
+            println!();
+            println!("{bold}{red}● Untracked — git chưa biết:{reset}",
+                bold = c(color, BOLD), red = c(color, RED), reset = c(color, RESET));
+            section = Section::Untracked;
+            continue;
+        }
+        if trimmed == "Unmerged paths:" {
+            println!();
+            println!("{bold}{red}● Conflict — chưa giải quyết:{reset}",
+                bold = c(color, BOLD), red = c(color, RED), reset = c(color, RESET));
+            section = Section::Conflict;
+            continue;
+        }
+        if trimmed == "nothing to commit, working tree clean" {
+            println!();
+            println!("  {green}✓ working tree sạch — không có gì để commit.{reset}",
+                green = c(color, GREEN), reset = c(color, RESET));
+            section = Section::None;
+            continue;
+        }
+        if trimmed.starts_with("no changes added to commit") {
+            // bỏ qua câu nhắc dài
+            continue;
+        }
+        // Bỏ các dòng "  (use \"git ...\" ...)"
+        if trimmed.starts_with("(use ") && trimmed.ends_with(")") {
+            continue;
+        }
+
+        // Dòng file của từng section
+        if matches!(section, Section::Staged | Section::Modified) {
+            // Dòng dạng "  modified: path" / "  new file: path" / "  deleted: path"
+            if let Some((label, path)) = split_status_line(&line) {
+                let (icon, col) = icon_for_status(&label, &section, color);
+                let path_str = path.trim();
+                if matches!(section, Section::Staged) {
+                    println!("  {col}{icon}{reset}  {green}{path}{reset}  {dim}({label}){reset}",
+                        col = col, icon = icon, reset = c(color, RESET),
+                        green = c(color, GREEN), path = path_str,
+                        dim = c(color, DIM), label = label);
+                } else {
+                    println!("  {col}{icon}{reset}  {yellow}{path}{reset}  {dim}({label}){reset}",
+                        col = col, icon = icon, reset = c(color, RESET),
+                        yellow = c(color, YELLOW), path = path_str,
+                        dim = c(color, DIM), label = label);
+                }
+                continue;
+            }
+        }
+        if matches!(section, Section::Untracked) {
+            if !trimmed.is_empty() {
+                println!("  {red}+{reset}  {path}",
+                    red = c(color, RED), reset = c(color, RESET), path = trimmed);
+                continue;
+            }
+        }
+        if matches!(section, Section::Conflict) {
+            if let Some((label, path)) = split_status_line(&line) {
+                println!("  {red}⚠{reset}  {red}{path}{reset}  {dim}({label}){reset}",
+                    red = c(color, RED), reset = c(color, RESET),
+                    path = path.trim(), dim = c(color, DIM), label = label);
+                continue;
+            }
+        }
+        // dòng trống / khác — bỏ qua để output gọn
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Section { None, Staged, Modified, Untracked, Conflict }
+
+fn split_status_line(line: &str) -> Option<(String, String)> {
+    // line dạng "\tmodified:   path" hoặc "        modified:   path"
+    let l = line.trim_start();
+    let colon = l.find(':')?;
+    let label = l[..colon].to_string();
+    if label.contains(' ') && !label.starts_with("new file") {
+        // không phải status label
+        return None;
+    }
+    let path = l[colon + 1..].trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    Some((label, path))
+}
+
+fn icon_for_status(label: &str, _section: &Section, _color: bool) -> (&'static str, &'static str) {
+    match label {
+        "modified" => ("✎", YELLOW),
+        "new file" => ("+", GREEN),
+        "deleted" => ("✗", RED),
+        "renamed" => ("→", CYAN),
+        "copied" => ("⇒", CYAN),
+        "typechange" => ("⇄", MAGENTA),
+        "both modified" | "both added" | "both deleted" => ("⚠", RED),
+        _ => ("•", DIM),
+    }
+}
+
+fn print_kv(color: bool, label: &str, value: &str, val_color: &str) {
+    println!("  {dim}{label:>8}{reset}  {col}{value}{reset}",
+        dim = c(color, DIM), label = label, reset = c(color, RESET),
+        col = c(color, val_color), value = value);
+}
+
+/// Loại bỏ ANSI escape (vì git -c color.ui=always có thể đã thêm).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_esc = false;
+    for ch in s.chars() {
+        if in_esc {
+            if ch == 'm' { in_esc = false; }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_esc = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn pretty_git_branch(out: &str, color: bool) {
+    // Output `git branch`:
+    //   * main
+    //     feature/x
+    //     bugfix/y
+    // Với -a:
+    //     remotes/origin/main
+    // Với -vv kèm SHA và tracking
+    for raw in out.lines() {
+        let line = strip_ansi(raw);
+        let is_current = line.starts_with('*');
+        let trimmed = line.trim_start_matches('*').trim_start();
+        if trimmed.is_empty() { continue; }
+        // Tách phần đầu (branch name) và phần đuôi (SHA + tracking)
+        let mut parts_iter = trimmed.splitn(2, char::is_whitespace);
+        let name = parts_iter.next().unwrap_or("");
+        let extra = parts_iter.next().unwrap_or("").trim();
+        let is_remote = name.starts_with("remotes/") || name.contains("HEAD ->");
+        let prefix = if is_current { "●" } else { " " };
+        let name_color = if is_current { BRIGHT_GREEN }
+                         else if is_remote { MAGENTA }
+                         else { CYAN };
+        let pad_name = if is_current { BOLD } else { "" };
+        if extra.is_empty() {
+            println!("  {col_p}{prefix}{reset}  {bold}{col}{name}{reset}",
+                col_p = c(color, GREEN), prefix = prefix, reset = c(color, RESET),
+                bold = c(color, pad_name), col = c(color, name_color), name = name);
+        } else {
+            println!("  {col_p}{prefix}{reset}  {bold}{col}{name}{reset}  {dim}{extra}{reset}",
+                col_p = c(color, GREEN), prefix = prefix, reset = c(color, RESET),
+                bold = c(color, pad_name), col = c(color, name_color), name = name,
+                dim = c(color, DIM), extra = extra);
+        }
+    }
+}
 
 fn pretty_du(out: &str, color: bool) {
     let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();

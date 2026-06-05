@@ -9,7 +9,7 @@ use crate::shell::Shell;
 pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
-    "help", "?", "which", "true", "false", "explain",
+    "help", "?", "which", "true", "false", "explain", "bookmark",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -42,6 +42,7 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "false" => Ok(1),
         "set" => Ok(0),
         "explain" => crate::explain::run(shell, &argv[1..].to_vec()),
+        "bookmark" => crate::bookmark::run(shell, argv),
         _ => Err(anyhow!("builtin chưa hỗ trợ: {}", cmd)),
     };
     flush_std();
@@ -350,36 +351,36 @@ fn kill(args: &[&str]) -> Result<i32> {
 fn help() -> Result<i32> {
     println!("\x1b[1mJakShell — trợ giúp\x1b[0m");
     println!();
-    println!("\x1b[36m▸ Lệnh tích hợp:\x1b[0m");
-    println!("  cd <thư mục>        đổi thư mục (cd -, cd, cd ~)");
-    println!("  pwd                  in thư mục hiện tại");
-    println!("  ls <file>            (lệnh hệ thống) liệt kê tệp");
-    println!("  echo <chuỗi>         in chuỗi");
-    println!("  export VAR=giá_trị   đặt biến môi trường");
-    println!("  alias x='y'          tạo bí danh");
-    println!("  history              xem lịch sử lệnh");
-    println!("  jobs / fg / bg       quản lý job nền");
-    println!("  source <tệp>         nạp script");
-    println!("  explain <lệnh>       chạy lệnh kèm chú thích các cột output");
-    println!("  <lệnh> --jak         tô màu + reformat output (ls/ps/df/du)");
-    println!("  exit                 thoát");
-    println!();
-    println!("\x1b[36m▸ Cú pháp:\x1b[0m");
-    println!("  a | b                 ống dẫn");
-    println!("  a && b   a || b   a;b điều kiện / chuỗi");
-    println!("  > >> < 2> 2>> &>     chuyển hướng");
-    println!("  cmd &                 chạy nền");
-    println!("  $VAR  ${{VAR}}  ~     biến / thư mục home");
-    println!("  *  ?  [abc]           glob");
-    println!();
     println!("\x1b[36m▸ Tiện ích JakShell (gõ `jak help` để xem chi tiết):\x1b[0m");
     println!("  jak clean             dọn cache & file tạm");
     println!("  jak backup <thư_mục>  nén & đặt tên theo ngày");
     println!("  jak update            cập nhật hệ thống (brew/apt/dnf)");
-    println!("  jak find <tên>        tìm file gần đây");
+    println!("  jak find <tên>        tìm file/thư mục (file/dir/text/big/recent)");
     println!("  jak open <đường_dẫn>  mở bằng app mặc định");
     println!("  jak sysinfo           thông tin máy");
     println!("  jak theme <tên>       đổi giao diện");
+    println!("  jak ip                IP nội bộ + public");
+    println!("  jak weather [tp]      thời tiết");
+    println!("  jak git <sub>         workflow git (save/sync/wip/amend/...)");
+    println!("  jak <bookmark>        chạy lệnh đã bookmark (xem `bookmark`)");
+    println!();
+    println!("\x1b[36m▸ bookmark — đặt tên cho lệnh dài:\x1b[0m");
+    println!("  bookmark <name> <cmd ...>   tạo / cập nhật");
+    println!("  bookmark                    liệt kê");
+    println!("  bookmark del <name>         xoá");
+    println!();
+    println!("\x1b[36m▸ explain — chú thích lệnh:\x1b[0m");
+    println!("  explain                liệt kê các lệnh đã có chú thích");
+    println!("  explain <lệnh>         xem usage / tham số / ví dụ");
+    println!("  explain ls -la         live annotate giá trị thật trên output");
+    println!();
+    println!("\x1b[36m▸ --jak — tô màu & format lại output:\x1b[0m");
+    println!("  ls -la --jak           tô màu permissions, icon thư mục/exec");
+    println!("  ps aux --jak           PID, %CPU, %MEM tô theo ngưỡng");
+    println!("  df -h --jak            Use% xanh→vàng→đỏ; size theo đơn vị");
+    println!("  du -sh --jak           căn cột size");
+    println!("  git status --jak       bố cục theo section + icon");
+    println!("  git branch --jak       ● cho branch hiện tại");
     println!();
     println!("\x1b[2mCấu hình tại ~/.jakshrc.toml và ~/.jakshrc\x1b[0m");
     Ok(0)

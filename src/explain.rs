@@ -90,6 +90,32 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
 // ─── Lookup ───────────────────────────────────────────────────────────────────
 
 fn lookup_explanation(cmd: &str, rest: &[&str]) -> Option<&'static Explanation> {
+    if cmd == "docker" {
+        let sub = rest.iter().find(|a| !a.starts_with('-')).copied();
+        return match sub {
+            Some("ps") => Some(&DOCKER_PS),
+            Some("exec") => Some(&DOCKER_EXEC),
+            Some("run") => Some(&DOCKER_RUN),
+            Some("build") => Some(&DOCKER_BUILD),
+            Some("images") | Some("image") => Some(&DOCKER_IMAGES),
+            Some("pull") => Some(&DOCKER_PULL),
+            Some("push") => Some(&DOCKER_PUSH),
+            Some("logs") => Some(&DOCKER_LOGS),
+            Some("stop") | Some("start") | Some("restart") | Some("kill") | Some("pause") | Some("unpause") => Some(&DOCKER_LIFECYCLE),
+            Some("rm") => Some(&DOCKER_RM),
+            Some("rmi") => Some(&DOCKER_RMI),
+            Some("inspect") => Some(&DOCKER_INSPECT),
+            Some("network") => Some(&DOCKER_NETWORK),
+            Some("volume") => Some(&DOCKER_VOLUME),
+            Some("compose") => Some(&DOCKER_COMPOSE),
+            Some("cp") => Some(&DOCKER_CP),
+            Some("login") | Some("logout") => Some(&DOCKER_LOGIN),
+            Some("system") | Some("prune") => Some(&DOCKER_SYSTEM),
+            Some("tag") => Some(&DOCKER_TAG),
+            _ => Some(&DOCKER),
+        };
+    }
+
     if cmd == "git" {
         let sub = rest.iter().find(|a| !a.starts_with('-')).copied();
         return match sub {
@@ -97,6 +123,28 @@ fn lookup_explanation(cmd: &str, rest: &[&str]) -> Option<&'static Explanation> 
             Some("log") => Some(&GIT_LOG),
             Some("diff") => Some(&GIT_DIFF),
             Some("branch") => Some(&GIT_BRANCH),
+            Some("clone") => Some(&GIT_CLONE),
+            Some("init") => Some(&GIT_INIT),
+            Some("add") => Some(&GIT_ADD),
+            Some("commit") => Some(&GIT_COMMIT),
+            Some("push") => Some(&GIT_PUSH),
+            Some("pull") => Some(&GIT_PULL),
+            Some("fetch") => Some(&GIT_FETCH),
+            Some("merge") => Some(&GIT_MERGE),
+            Some("rebase") => Some(&GIT_REBASE),
+            Some("reset") => Some(&GIT_RESET),
+            Some("restore") => Some(&GIT_RESTORE),
+            Some("revert") => Some(&GIT_REVERT),
+            Some("stash") => Some(&GIT_STASH),
+            Some("tag") => Some(&GIT_TAG),
+            Some("remote") => Some(&GIT_REMOTE),
+            Some("checkout") => Some(&GIT_CHECKOUT),
+            Some("switch") => Some(&GIT_SWITCH),
+            Some("cherry-pick") => Some(&GIT_CHERRY_PICK),
+            Some("blame") => Some(&GIT_BLAME),
+            Some("show") => Some(&GIT_SHOW),
+            Some("reflog") => Some(&GIT_REFLOG),
+            Some("config") => Some(&GIT_CONFIG),
             _ => Some(&GIT),
         };
     }
@@ -144,6 +192,10 @@ fn lookup_explanation(cmd: &str, rest: &[&str]) -> Option<&'static Explanation> 
         "lsof" => Some(&LSOF),
         // network
         "ssh" => Some(&SSH),
+        "ssh-keygen" => Some(&SSH_KEYGEN),
+        "ssh-copy-id" => Some(&SSH_COPY_ID),
+        "ssh-add" => Some(&SSH_ADD),
+        "sftp" => Some(&SFTP),
         "scp" => Some(&SCP),
         "curl" => Some(&CURL),
         "wget" => Some(&WGET),
@@ -312,13 +364,24 @@ fn list_all() {
         ("Đĩa & filesystem",
             &["df", "du", "free", "stat", "lsof"]),
         ("Mạng",
-            &["ssh", "scp", "curl", "wget", "ping", "netstat", "ss", "ifconfig", "ip"]),
+            &["ssh", "ssh-keygen", "ssh-copy-id", "ssh-add", "sftp", "scp",
+              "curl", "wget", "ping", "netstat", "ss", "ifconfig", "ip"]),
+        ("Docker",
+            &["docker", "docker ps", "docker exec", "docker run", "docker build",
+              "docker images", "docker pull", "docker push", "docker logs",
+              "docker stop/start/restart/kill", "docker rm", "docker rmi",
+              "docker inspect", "docker network", "docker volume", "docker compose",
+              "docker cp", "docker login", "docker system", "docker tag"]),
         ("Nén / Giải nén",
             &["tar", "zip", "unzip"]),
         ("Hệ thống & shell",
             &["uptime", "who", "date", "env", "alias", "history", "which", "man"]),
-        ("Git",
-            &["git", "git status", "git log", "git diff", "git branch"]),
+        ("Git — cơ bản",
+            &["git", "git status", "git log", "git diff", "git branch", "git config"]),
+        ("Git — file/commit",
+            &["git add", "git commit", "git restore", "git reset", "git revert", "git stash", "git show", "git blame", "git reflog"]),
+        ("Git — branch & remote",
+            &["git clone", "git init", "git checkout", "git switch", "git merge", "git rebase", "git cherry-pick", "git tag", "git remote", "git fetch", "git pull", "git push"]),
     ];
     for (group, cmds) in groups {
         println!("\x1b[2m▸ {}:\x1b[0m", group);
@@ -1912,4 +1975,1035 @@ const GIT_BRANCH: Explanation = Explanation {
     ],
     note: "Tracking format: `[origin/main: ahead 2, behind 1]` = local đi trước remote 2 commit, sau remote 1 commit.",
     skip_run: false,
+};
+
+// ─── Git extensions ───────────────────────────────────────────────────────────
+
+const GIT_CLONE: Explanation = Explanation {
+    name: "git clone",
+    summary: "Sao bản sao của repo từ remote về local",
+    usage: "git clone [options] <URL> [thư_mục_đích]",
+    flags: &[
+        ("--depth N", "shallow clone — chỉ lấy N commit cuối (nhanh, nhỏ)"),
+        ("-b BRANCH", "clone branch cụ thể"),
+        ("--single-branch", "chỉ tải branch đã chọn, không tải các branch khác"),
+        ("--recurse-submodules", "clone luôn submodule"),
+        ("-o NAME", "đặt tên remote (default: origin)"),
+        ("--bare", "clone bare repo (chỉ .git, không working tree)"),
+    ],
+    examples: &[
+        ("git clone https://github.com/user/repo.git", "clone về thư mục 'repo'"),
+        ("git clone git@github.com:user/repo.git myrepo", "clone qua SSH, đổi tên thư mục"),
+        ("git clone --depth 1 -b main URL", "shallow clone, chỉ branch main"),
+        ("git clone --recurse-submodules URL", "kéo cả submodule"),
+    ],
+    note: "",
+    skip_run: true,
+};
+
+const GIT_INIT: Explanation = Explanation {
+    name: "git init",
+    summary: "Khởi tạo repo git mới trong thư mục hiện tại",
+    usage: "git init [-b <branch>] [--bare] [path]",
+    flags: &[
+        ("-b NAME / --initial-branch=NAME", "đặt tên branch đầu tiên (default: main hoặc master tuỳ config)"),
+        ("--bare", "tạo bare repo (không có working tree — dùng làm server)"),
+    ],
+    examples: &[
+        ("git init", "khởi tạo trong cwd"),
+        ("git init -b main", "branch đầu là main"),
+        ("git init --bare repo.git", "tạo bare repo (dùng làm remote)"),
+    ],
+    note: "Sau init: `git add .` rồi `git commit -m 'first'` để tạo commit đầu.",
+    skip_run: true,
+};
+
+const GIT_ADD: Explanation = Explanation {
+    name: "git add",
+    summary: "Đưa thay đổi vào staging area (chuẩn bị commit)",
+    usage: "git add [-A | -u | -p] <path ...>",
+    flags: &[
+        ("-A / --all", "stage TẤT CẢ (mới + sửa + xoá) trong toàn repo"),
+        ("-u / --update", "chỉ stage file đã tracked (không lấy file mới)"),
+        ("-p / --patch", "stage tương tác theo từng hunk — chọn phần nào staged"),
+        ("-n / --dry-run", "in những gì sẽ stage, không làm thật"),
+        ("-f / --force", "ép stage cả file bị ignore"),
+        (".", "stage tất cả trong cwd (và con) — KHÔNG lấy thay đổi ở thư mục cha"),
+    ],
+    examples: &[
+        ("git add file.txt", "stage 1 file"),
+        ("git add .", "stage mọi thứ trong cwd"),
+        ("git add -A", "stage mọi thay đổi toàn repo"),
+        ("git add -u", "chỉ stage thay đổi của file đã track"),
+        ("git add -p", "review từng hunk trước khi stage"),
+    ],
+    note: "`-A` vs `.` — `-A` lấy cả file bên ngoài cwd, `.` chỉ trong cwd.\nJakShell có `jak git save \"msg\"` = `git add -A && git commit -m`.",
+    skip_run: true,
+};
+
+const GIT_COMMIT: Explanation = Explanation {
+    name: "git commit",
+    summary: "Tạo commit mới từ staged changes",
+    usage: "git commit [-m MSG | --amend] [-a]",
+    flags: &[
+        ("-m MSG", "commit message inline (không mở editor)"),
+        ("-a / --all", "tự add file đã track trước khi commit (KHÔNG lấy file mới)"),
+        ("--amend", "sửa commit cuối (đổi message hoặc thêm file)"),
+        ("--no-edit", "đi cùng --amend: giữ nguyên message"),
+        ("--allow-empty", "cho phép commit không có thay đổi"),
+        ("-S", "ký commit (cần GPG/SSH key)"),
+        ("--no-verify", "bỏ qua pre-commit hook (CẨN THẬN)"),
+    ],
+    examples: &[
+        ("git commit -m \"fix: typo\"", "commit nhanh"),
+        ("git commit", "mở editor cho message dài (đa dòng)"),
+        ("git commit -am \"msg\"", "auto-add file đã track + commit"),
+        ("git commit --amend --no-edit", "thêm staged vào commit cuối, giữ message"),
+        ("git commit --amend -m \"msg mới\"", "đổi message commit cuối"),
+    ],
+    note: "Đã push commit → amend là history rewrite, đừng làm nếu người khác đã pull.\nMessage chuẩn: dòng 1 ≤ 50 ký tự, kiểu mệnh lệnh ('add x' không 'added x').",
+    skip_run: true,
+};
+
+const GIT_PUSH: Explanation = Explanation {
+    name: "git push",
+    summary: "Đẩy commit local lên remote",
+    usage: "git push [<remote>] [<branch>] [-u] [-f]",
+    flags: &[
+        ("-u / --set-upstream", "đặt upstream cho branch (lần đầu push)"),
+        ("-f / --force", "ép push (ghi đè history — NGUY HIỂM với người khác)"),
+        ("--force-with-lease", "ép push AN TOÀN — fail nếu remote bị thay đổi từ lúc bạn pull"),
+        ("--tags", "đẩy luôn tag"),
+        ("--delete <branch>", "xoá branch trên remote"),
+        ("--dry-run", "in những gì sẽ push, không thực sự push"),
+    ],
+    examples: &[
+        ("git push", "push branch hiện tại lên upstream"),
+        ("git push -u origin feature/x", "push lần đầu, đặt upstream"),
+        ("git push --force-with-lease", "thay vì -f (an toàn hơn)"),
+        ("git push origin --delete old-branch", "xoá branch trên remote"),
+    ],
+    note: "Tránh `push -f` lên branch chung. Dùng `--force-with-lease` để bảo vệ commit của người khác.",
+    skip_run: true,
+};
+
+const GIT_PULL: Explanation = Explanation {
+    name: "git pull",
+    summary: "Tải commit từ remote và merge/rebase vào branch hiện tại",
+    usage: "git pull [--rebase | --ff-only] [<remote>] [<branch>]",
+    flags: &[
+        ("--rebase / -r", "thay merge bằng rebase (history tuyến tính)"),
+        ("--ff-only", "chỉ fast-forward — fail nếu cần merge"),
+        ("--no-rebase", "ép merge dù cấu hình default là rebase"),
+        ("--autostash", "tự stash thay đổi rồi pop sau khi xong"),
+    ],
+    examples: &[
+        ("git pull", "pull theo cấu hình mặc định"),
+        ("git pull --rebase", "rebase thay vì merge (sạch hơn)"),
+        ("git pull --ff-only", "an toàn — chỉ chấp nhận fast-forward"),
+        ("git pull origin main", "pull branch main từ origin"),
+    ],
+    note: "`pull` = `fetch` + `merge` (hoặc `rebase`). Nhiều người set default rebase: `git config --global pull.rebase true`.",
+    skip_run: true,
+};
+
+const GIT_FETCH: Explanation = Explanation {
+    name: "git fetch",
+    summary: "Tải commit từ remote về (KHÔNG merge — chỉ cập nhật remote-tracking)",
+    usage: "git fetch [--all] [--prune] [<remote>] [<branch>]",
+    flags: &[
+        ("--all", "fetch từ tất cả remote"),
+        ("--prune / -p", "xoá ref local của branch đã bị xoá trên remote"),
+        ("--tags", "fetch tags"),
+        ("--depth N", "shallow fetch"),
+    ],
+    examples: &[
+        ("git fetch", "fetch origin"),
+        ("git fetch --all --prune", "cập nhật mọi remote + dọn ref cũ"),
+        ("git fetch origin main", "chỉ fetch branch main"),
+    ],
+    note: "Sau fetch, branch local KHÔNG di chuyển. Xem update: `git log HEAD..origin/main`.",
+    skip_run: false,
+};
+
+const GIT_MERGE: Explanation = Explanation {
+    name: "git merge",
+    summary: "Gộp branch khác vào branch hiện tại",
+    usage: "git merge [--no-ff | --ff-only | --squash] <branch>",
+    flags: &[
+        ("--no-ff", "luôn tạo merge commit (giữ topology branch)"),
+        ("--ff-only", "chỉ fast-forward, fail nếu cần merge commit"),
+        ("--squash", "gộp tất cả commit của branch thành 1 (rồi cần commit thủ công)"),
+        ("--abort", "huỷ merge đang dở, quay về trạng thái trước"),
+        ("--continue", "tiếp tục merge sau khi giải xong conflict"),
+        ("-m MSG", "message cho merge commit"),
+    ],
+    examples: &[
+        ("git merge feature/x", "merge feature/x vào HEAD"),
+        ("git merge --no-ff feature", "tạo merge commit để giữ history rõ"),
+        ("git merge --squash feature && git commit -m \"feature\"", "squash"),
+        ("git merge --abort", "huỷ khi gặp conflict không muốn xử lý"),
+    ],
+    note: "Có conflict: sửa file → `git add` file đã giải → `git merge --continue`.",
+    skip_run: true,
+};
+
+const GIT_REBASE: Explanation = Explanation {
+    name: "git rebase",
+    summary: "Apply commit của branch hiện tại lên đỉnh branch khác (linear history)",
+    usage: "git rebase [-i] [--onto X] <upstream>",
+    flags: &[
+        ("-i / --interactive", "rebase tương tác — reorder/squash/edit/drop commit"),
+        ("--onto X", "rebase lên target X khác upstream"),
+        ("--continue", "tiếp sau khi giải xong conflict"),
+        ("--abort", "huỷ rebase đang dở"),
+        ("--skip", "bỏ commit hiện tại, đi tiếp"),
+        ("--autosquash", "tự sắp xếp commit fixup!/squash!"),
+    ],
+    examples: &[
+        ("git rebase main", "đưa commit của branch hiện tại lên đỉnh main"),
+        ("git rebase -i HEAD~5", "interactive rebase 5 commit cuối"),
+        ("git rebase --onto main feature~3 feature", "lấy 3 commit cuối của feature, đặt lên main"),
+    ],
+    note: "⚠ Đừng rebase commit đã push lên branch chung (history rewrite gây vấn đề cho người khác).\nMerge an toàn hơn rebase khi làm việc nhóm.",
+    skip_run: true,
+};
+
+const GIT_RESET: Explanation = Explanation {
+    name: "git reset",
+    summary: "Di chuyển HEAD (và tuỳ chọn: index, working tree)",
+    usage: "git reset [--soft | --mixed | --hard] [<commit>]",
+    flags: &[
+        ("--soft", "chỉ di chuyển HEAD; index + working tree GIỮ NGUYÊN"),
+        ("--mixed (default)", "di chuyển HEAD + reset index; working tree GIỮ NGUYÊN"),
+        ("--hard", "di chuyển HEAD + reset index + xoá thay đổi working tree (MẤT DỮ LIỆU)"),
+        ("HEAD~1", "lùi 1 commit"),
+        ("<file>", "không kèm commit: bỏ stage file (giống `restore --staged`)"),
+    ],
+    examples: &[
+        ("git reset --soft HEAD~1", "huỷ commit cuối, GIỮ staged → ~ `jak git uncommit`"),
+        ("git reset HEAD~1", "huỷ commit cuối, GIỮ thay đổi (chưa stage)"),
+        ("git reset --hard HEAD~1", "huỷ commit cuối, XOÁ luôn thay đổi"),
+        ("git reset HEAD file.txt", "bỏ stage file.txt"),
+    ],
+    note: "⚠ `--hard` không phục hồi được qua `git status` — dùng `git reflog` để tìm commit cũ.\nCommit đã push? Dùng `git revert` thay vì reset.",
+    skip_run: true,
+};
+
+const GIT_RESTORE: Explanation = Explanation {
+    name: "git restore",
+    summary: "Khôi phục file (cách mới, thay cho `checkout <file>` và `reset HEAD <file>`)",
+    usage: "git restore [--staged] [--source <ref>] <file ...>",
+    flags: &[
+        ("--staged / -S", "bỏ stage file (KHÔNG đổi nội dung file trên đĩa)"),
+        ("--worktree / -W", "khôi phục file về như HEAD (XOÁ thay đổi chưa stage)"),
+        ("--source <ref>", "khôi phục từ commit/branch khác"),
+        ("--patch / -p", "tương tác từng hunk"),
+    ],
+    examples: &[
+        ("git restore --staged file.txt", "bỏ stage"),
+        ("git restore file.txt", "khôi phục file về như HEAD — MẤT chỉnh sửa chưa commit"),
+        ("git restore --source=main src/", "lấy thư mục src/ từ branch main"),
+        ("git restore .", "khôi phục TẤT CẢ — CẨN THẬN"),
+    ],
+    note: "Lệnh mới (git ≥ 2.23). Cũ: `git checkout -- file` (worktree) hoặc `git reset HEAD file` (unstage).",
+    skip_run: true,
+};
+
+const GIT_REVERT: Explanation = Explanation {
+    name: "git revert",
+    summary: "Tạo commit MỚI undo commit cũ (an toàn cho history đã push)",
+    usage: "git revert [<commit> ...]",
+    flags: &[
+        ("--no-commit / -n", "stage thay đổi đảo, KHÔNG tự commit"),
+        ("--no-edit", "không mở editor cho message"),
+        ("-m N", "với merge commit: chọn parent N để revert"),
+        ("--continue / --abort", "khi gặp conflict"),
+    ],
+    examples: &[
+        ("git revert HEAD", "đảo commit cuối (tạo commit mới)"),
+        ("git revert abc1234", "đảo commit abc1234"),
+        ("git revert HEAD~3..HEAD", "đảo 3 commit cuối, tạo 3 commit đảo"),
+        ("git revert -n abc1234", "stage thay đổi đảo, để gộp với thay đổi khác trước khi commit"),
+    ],
+    note: "Khác `reset`: revert KHÔNG xoá history, chỉ thêm commit mới. AN TOÀN với branch chung.",
+    skip_run: true,
+};
+
+const GIT_STASH: Explanation = Explanation {
+    name: "git stash",
+    summary: "Cất tạm thay đổi để chuyển branch hoặc dọn working tree",
+    usage: "git stash [push -m MSG] | list | pop | apply | drop | clear",
+    flags: &[
+        ("push -m MSG", "cất với message (default action)"),
+        ("-u / --include-untracked", "cất luôn file untracked"),
+        ("-k / --keep-index", "không cất file đã staged"),
+        ("list", "xem danh sách stash"),
+        ("show [-p] [stash@{N}]", "xem nội dung stash"),
+        ("pop [stash@{N}]", "apply + xoá khỏi list"),
+        ("apply [stash@{N}]", "apply nhưng GIỮ trong list"),
+        ("drop [stash@{N}]", "xoá 1 stash"),
+        ("clear", "xoá TẤT CẢ stash"),
+        ("branch NAME [stash]", "tạo branch mới từ stash"),
+    ],
+    examples: &[
+        ("git stash", "cất thay đổi"),
+        ("git stash push -m \"WIP feature X\"", "cất có message"),
+        ("git stash -u", "cất cả untracked"),
+        ("git stash list", "xem stash@{0}, @{1}, …"),
+        ("git stash pop", "lấy stash mới nhất ra"),
+        ("git stash apply stash@{2}", "áp stash số 2, giữ trong list"),
+        ("git stash drop stash@{0}", "xoá stash mới nhất"),
+    ],
+    note: "Stash là stack: @{0} mới nhất. `pop` an toàn nếu chắc apply OK; `apply` rồi `drop` thủ công nếu cần giữ backup.",
+    skip_run: true,
+};
+
+const GIT_TAG: Explanation = Explanation {
+    name: "git tag",
+    summary: "Đánh dấu commit (thường cho release vX.Y.Z)",
+    usage: "git tag [-a <name> -m MSG] [-d <name>] [<name> [<commit>]]",
+    flags: &[
+        ("(không tham số)", "list tag"),
+        ("-l 'pattern'", "list tag khớp pattern"),
+        ("<name>", "tạo lightweight tag (chỉ là 1 ref)"),
+        ("-a <name> -m MSG", "tạo annotated tag (có metadata + signature)"),
+        ("-s <name>", "tag có chữ ký GPG"),
+        ("-d <name>", "xoá tag local"),
+        ("git push origin <tag>", "push tag lên remote (push thường KHÔNG mang tag)"),
+        ("git push --tags", "push tất cả tag"),
+        ("git push origin --delete <tag>", "xoá tag trên remote"),
+    ],
+    examples: &[
+        ("git tag", "list tag"),
+        ("git tag v1.0.0", "lightweight tag tại HEAD"),
+        ("git tag -a v1.0.0 -m \"Release 1.0\"", "annotated tag (khuyên dùng cho release)"),
+        ("git push origin v1.0.0", "push tag lên remote"),
+        ("git tag -d v1.0.0-rc", "xoá tag local"),
+    ],
+    note: "Tag là ref bất biến — gắn vào commit, không di chuyển.",
+    skip_run: false,
+};
+
+const GIT_REMOTE: Explanation = Explanation {
+    name: "git remote",
+    summary: "Quản lý remote (bản sao của repo ở nơi khác)",
+    usage: "git remote [-v] | add NAME URL | remove NAME | set-url NAME URL | rename OLD NEW",
+    flags: &[
+        ("(không tham số)", "list tên remote"),
+        ("-v / --verbose", "kèm URL"),
+        ("add NAME URL", "thêm remote mới"),
+        ("remove / rm NAME", "xoá remote"),
+        ("rename OLD NEW", "đổi tên remote"),
+        ("set-url NAME URL", "đổi URL"),
+        ("show NAME", "chi tiết: URL, fetch refs, branch theo dõi"),
+        ("prune NAME", "xoá ref local của branch đã bị xoá trên remote"),
+    ],
+    examples: &[
+        ("git remote -v", "list kèm URL"),
+        ("git remote add upstream https://github.com/orig/repo", "thêm upstream"),
+        ("git remote set-url origin git@github.com:user/repo.git", "đổi sang SSH"),
+        ("git remote prune origin", "dọn ref cũ"),
+    ],
+    note: "Quy ước tên: `origin` = remote chính, `upstream` = repo gốc khi fork.",
+    skip_run: false,
+};
+
+const GIT_CHECKOUT: Explanation = Explanation {
+    name: "git checkout",
+    summary: "Chuyển branch / khôi phục file (lệnh đa năng — Git 2.23 tách thành `switch` + `restore`)",
+    usage: "git checkout <branch> | -b <new> | <commit> | -- <file>",
+    flags: &[
+        ("<branch>", "chuyển sang branch"),
+        ("-b <new>", "tạo branch mới + chuyển"),
+        ("-B <new>", "tạo hoặc reset branch + chuyển"),
+        ("<commit>", "chuyển sang commit (detached HEAD)"),
+        ("-- <file>", "khôi phục file về như HEAD (như `restore --worktree`)"),
+        ("-t <remote-branch>", "track remote branch"),
+        ("-f", "force — bỏ qua thay đổi chưa commit (MẤT DỮ LIỆU)"),
+    ],
+    examples: &[
+        ("git checkout main", "chuyển sang main"),
+        ("git checkout -b feature/x", "tạo branch + chuyển"),
+        ("git checkout -- file.txt", "khôi phục file"),
+        ("git checkout abc123", "detached HEAD ở commit abc123"),
+    ],
+    note: "Khuyên dùng: `git switch` để chuyển branch, `git restore` để khôi phục file (rõ ràng hơn).",
+    skip_run: true,
+};
+
+const GIT_SWITCH: Explanation = Explanation {
+    name: "git switch",
+    summary: "Chuyển branch (lệnh mới, thay cho `checkout` cho mục đích chuyển branch)",
+    usage: "git switch [-c | -C] <branch>",
+    flags: &[
+        ("<branch>", "chuyển sang branch đã có"),
+        ("-c <new>", "tạo branch mới + chuyển"),
+        ("-C <new>", "tạo hoặc reset branch + chuyển"),
+        ("-d <commit>", "detached HEAD ở commit"),
+        ("- (dấu trừ)", "chuyển về branch trước đó"),
+        ("--orphan <new>", "tạo branch không có history (clean slate)"),
+        ("-t <remote>", "track remote branch"),
+    ],
+    examples: &[
+        ("git switch main", "chuyển sang main"),
+        ("git switch -c feature/x", "tạo + chuyển"),
+        ("git switch -", "quay lại branch trước"),
+        ("git switch -t origin/feat-x", "tạo branch local track remote feat-x"),
+    ],
+    note: "Git ≥ 2.23. KHÔNG động vào file (so với `checkout` đa năng) — an toàn hơn.",
+    skip_run: true,
+};
+
+const GIT_CHERRY_PICK: Explanation = Explanation {
+    name: "git cherry-pick",
+    summary: "Apply 1 (hoặc nhiều) commit từ branch khác lên HEAD",
+    usage: "git cherry-pick <commit> [<commit> ...]",
+    flags: &[
+        ("<commit>", "apply commit này lên HEAD (tạo commit mới)"),
+        ("A^..B", "range — apply A đến B (KHÔNG bao gồm A; +1 nếu muốn gồm A: A~1..B)"),
+        ("-n / --no-commit", "stage thay đổi, không tự commit"),
+        ("-x", "ghi 'cherry picked from commit X' vào message"),
+        ("--continue / --abort / --skip", "khi gặp conflict"),
+    ],
+    examples: &[
+        ("git cherry-pick abc1234", "lấy commit abc1234 áp vào branch hiện tại"),
+        ("git cherry-pick abc..def", "lấy range"),
+        ("git cherry-pick -x abc1234", "có note 'cherry picked from'"),
+    ],
+    note: "Conflict → fix → `git add` → `git cherry-pick --continue`.",
+    skip_run: true,
+};
+
+const GIT_BLAME: Explanation = Explanation {
+    name: "git blame",
+    summary: "Cho biết mỗi dòng được commit bởi ai, khi nào",
+    usage: "git blame [-L START,END] [-e] <file>",
+    flags: &[
+        ("-L START,END", "chỉ blame phạm vi dòng (vd -L 10,20)"),
+        ("-L /regex/", "blame dòng khớp regex"),
+        ("-e", "in email thay vì tên"),
+        ("-w", "ignore whitespace changes"),
+        ("--since=DATE", "chỉ commit từ DATE"),
+        ("-C", "phát hiện code di chuyển/copy"),
+    ],
+    examples: &[
+        ("git blame src/main.rs", "blame cả file"),
+        ("git blame -L 10,20 src/main.rs", "chỉ dòng 10-20"),
+        ("git blame -L /TODO/,+5 file", "blame 5 dòng quanh TODO"),
+    ],
+    note: "Để xem chi tiết commit từ blame: `git show <sha>`.",
+    skip_run: false,
+};
+
+const GIT_SHOW: Explanation = Explanation {
+    name: "git show",
+    summary: "Xem chi tiết 1 object (commit / tag / file ở commit)",
+    usage: "git show [<commit> | <tag> | <commit>:<file>]",
+    flags: &[
+        ("<commit>", "metadata + diff của commit"),
+        ("<tag>", "thông tin tag (annotated) hoặc trỏ tới commit"),
+        ("<commit>:<file>", "in nội dung file tại commit"),
+        ("--stat", "tóm tắt số dòng đổi mỗi file"),
+        ("--name-only", "chỉ tên file đổi"),
+        ("--pretty=oneline", "format gọn"),
+    ],
+    examples: &[
+        ("git show HEAD", "commit cuối"),
+        ("git show abc123", "commit abc123"),
+        ("git show abc123:src/main.rs", "file src/main.rs ở commit abc123"),
+        ("git show --stat HEAD~5", "tóm tắt commit cách đây 5"),
+    ],
+    note: "",
+    skip_run: false,
+};
+
+const GIT_REFLOG: Explanation = Explanation {
+    name: "git reflog",
+    summary: "Lịch sử mọi cú di chuyển HEAD (cứu commit đã 'mất' do reset/rebase)",
+    usage: "git reflog [show] [-n N]",
+    flags: &[
+        ("(không tham số)", "in tất cả entry"),
+        ("show", "= không tham số"),
+        ("-n N", "N entry gần nhất"),
+        ("expire", "xoá entry cũ (cấu hình hết hạn)"),
+    ],
+    examples: &[
+        ("git reflog", "xem mọi cú di chuyển HEAD gần đây"),
+        ("git reset --hard HEAD@{2}", "phục hồi HEAD về 2 bước trước"),
+        ("git show HEAD@{1}", "xem commit ở vị trí HEAD trước đó"),
+    ],
+    note: "⭐ Cứu cánh khi lỡ `reset --hard` hoặc rebase nhầm. Default giữ 90 ngày.",
+    skip_run: false,
+};
+
+const GIT_CONFIG: Explanation = Explanation {
+    name: "git config",
+    summary: "Xem/đặt cấu hình git (local / global / system)",
+    usage: "git config [--global | --local | --system] [--list | --get | --unset] <key> [value]",
+    flags: &[
+        ("--global", "cho user hiện tại (~/.gitconfig)"),
+        ("--local (default)", "chỉ repo hiện tại (.git/config)"),
+        ("--system", "toàn hệ thống (/etc/gitconfig)"),
+        ("--list / -l", "in tất cả config"),
+        ("--get KEY", "in 1 key"),
+        ("--unset KEY", "xoá key"),
+        ("--edit / -e", "mở config bằng editor"),
+    ],
+    examples: &[
+        ("git config --global user.name \"Alice\"", ""),
+        ("git config --global user.email \"alice@example.com\"", ""),
+        ("git config --global pull.rebase true", "default rebase khi pull"),
+        ("git config --global init.defaultBranch main", ""),
+        ("git config --list --show-origin", "xem mọi config + file nào set"),
+        ("git config --global alias.lg \"log --oneline --graph --decorate\"", ""),
+    ],
+    note: "Thứ tự ưu tiên: system < global < local < environment.",
+    skip_run: false,
+};
+
+// ─── SSH family ───────────────────────────────────────────────────────────────
+
+const SSH_KEYGEN: Explanation = Explanation {
+    name: "ssh-keygen",
+    summary: "Tạo / quản lý SSH key pair",
+    usage: "ssh-keygen -t <type> [-b BITS] [-C COMMENT] [-f FILE]",
+    flags: &[
+        ("-t TYPE", "loại key: ed25519 (khuyên dùng) / rsa / ecdsa / dsa (lỗi thời)"),
+        ("-b BITS", "độ dài key (rsa: 3072+; ed25519 không cần)"),
+        ("-C COMMENT", "comment (thường là email) gắn vào public key"),
+        ("-f FILE", "tên file output (default ~/.ssh/id_<type>)"),
+        ("-N PASSPHRASE", "đặt passphrase ngay (rỗng = không passphrase)"),
+        ("-p", "đổi passphrase của key đã có"),
+        ("-y", "in lại public key từ private key"),
+        ("-l -f FILE", "in fingerprint của key"),
+        ("-R HOST", "xoá HOST khỏi known_hosts"),
+    ],
+    examples: &[
+        ("ssh-keygen -t ed25519 -C \"alice@example.com\"", "tạo key ed25519 (mặc định ~/.ssh/id_ed25519)"),
+        ("ssh-keygen -t rsa -b 4096 -C \"work\" -f ~/.ssh/work_rsa", "rsa 4096-bit, file riêng"),
+        ("ssh-keygen -p -f ~/.ssh/id_ed25519", "đổi passphrase"),
+        ("ssh-keygen -y -f ~/.ssh/id_ed25519", "in public key từ private"),
+        ("ssh-keygen -lf ~/.ssh/id_ed25519.pub", "in fingerprint"),
+    ],
+    note: "ed25519 nhanh + an toàn hơn RSA cùng độ bảo mật. Public key có đuôi `.pub`.",
+    skip_run: true,
+};
+
+const SSH_COPY_ID: Explanation = Explanation {
+    name: "ssh-copy-id",
+    summary: "Copy public key sang authorized_keys của server (để SSH không cần password)",
+    usage: "ssh-copy-id [-i KEY.pub] [-p PORT] [user@]host",
+    flags: &[
+        ("-i FILE", "chỉ định public key cụ thể (mặc định ~/.ssh/id_*.pub)"),
+        ("-p PORT", "port SSH"),
+        ("-f", "force — không check key đã có chưa"),
+        ("-n", "dry run — in lệnh sẽ chạy, không thực sự copy"),
+    ],
+    examples: &[
+        ("ssh-copy-id alice@server.com", "copy key mặc định"),
+        ("ssh-copy-id -i ~/.ssh/work_rsa.pub alice@host", "key riêng"),
+        ("ssh-copy-id -p 2222 user@host", "port khác 22"),
+    ],
+    note: "Yêu cầu đăng nhập bằng password lần này, sau đó SSH sẽ không cần password nữa.\nKhông có `ssh-copy-id` (Windows)? Dùng: `cat ~/.ssh/id_ed25519.pub | ssh user@host 'cat >> ~/.ssh/authorized_keys'`.",
+    skip_run: true,
+};
+
+const SSH_ADD: Explanation = Explanation {
+    name: "ssh-add",
+    summary: "Thêm SSH key vào ssh-agent (để không phải gõ passphrase mỗi lần)",
+    usage: "ssh-add [file] | -l | -d | -D | -t SECS",
+    flags: &[
+        ("(không tham số)", "thêm các key mặc định trong ~/.ssh/"),
+        ("FILE", "thêm key cụ thể"),
+        ("-l", "list fingerprint key đã add"),
+        ("-L", "list public key đầy đủ"),
+        ("-d FILE", "xoá 1 key khỏi agent"),
+        ("-D", "xoá TẤT CẢ key"),
+        ("-t SECS", "giới hạn thời gian sống của key (giây)"),
+        ("-K (macOS)", "lưu passphrase vào Keychain"),
+    ],
+    examples: &[
+        ("ssh-add", "add key mặc định"),
+        ("ssh-add ~/.ssh/work_rsa", "add key cụ thể"),
+        ("ssh-add -l", "xem các key đang trong agent"),
+        ("ssh-add -K ~/.ssh/id_ed25519", "macOS: lưu passphrase vào Keychain"),
+        ("ssh-add -t 3600 ~/.ssh/temp_key", "key sống 1 giờ"),
+    ],
+    note: "Agent chưa chạy? `eval \"$(ssh-agent -s)\"`. Trên macOS, agent đã sẵn (`ssh-agent` autostart).",
+    skip_run: true,
+};
+
+const SFTP: Explanation = Explanation {
+    name: "sftp",
+    summary: "Secure FTP — interactive file transfer qua SSH",
+    usage: "sftp [-P PORT] [-i KEY] [user@]host",
+    flags: &[
+        ("-P PORT (HOA)", "port SSH (khác với scp dùng -P, ssh dùng -p thường)"),
+        ("-i KEY", "private key"),
+        ("-r", "đệ quy (cho put / get)"),
+        ("-b FILE", "batch mode — đọc lệnh từ FILE"),
+    ],
+    examples: &[
+        ("sftp alice@host", "mở phiên interactive"),
+        ("sftp -P 2222 -i ~/.ssh/work user@host", "port + key tuỳ chọn"),
+        ("sftp -b script.txt user@host", "chạy lệnh từ file"),
+    ],
+    note: "Phím trong sftp:\n  ls / lls         remote / local ls\n  cd / lcd         remote / local cd\n  pwd / lpwd       remote / local pwd\n  put FILE         upload\n  get FILE         download\n  mkdir / rmdir / rm\n  bye / quit       thoát\nMặc định: kết nối tới HOME của user remote.",
+    skip_run: true,
+};
+
+// ─── Docker ───────────────────────────────────────────────────────────────────
+
+const DOCKER: Explanation = Explanation {
+    name: "docker",
+    summary: "Container runtime — quản lý image và container",
+    usage: "docker <subcommand> [args]",
+    flags: &[
+        ("ps",           "list container đang chạy"),
+        ("ps -a",        "list TẤT CẢ container (kể cả đã stop)"),
+        ("images",       "list image local"),
+        ("run IMAGE",    "chạy container mới"),
+        ("exec CONT CMD","chạy lệnh trong container đang chạy"),
+        ("logs CONT",    "xem log"),
+        ("build PATH",   "build image từ Dockerfile"),
+        ("pull IMAGE",   "tải image từ registry"),
+        ("push IMAGE",   "đẩy image lên registry"),
+        ("stop / start / restart / kill", "lifecycle container"),
+        ("rm / rmi",     "xoá container / image"),
+        ("inspect",      "metadata chi tiết (JSON)"),
+        ("network / volume", "quản lý network / volume"),
+        ("compose",      "Docker Compose (docker-compose.yml)"),
+        ("system prune", "dọn dẹp toàn bộ resource không dùng"),
+    ],
+    examples: &[
+        ("docker ps", "container đang chạy"),
+        ("docker exec -it payin_app sh", "shell vào container"),
+        ("docker logs -f my_api", "follow log"),
+        ("docker compose up -d", "khởi động stack"),
+    ],
+    note: "Gõ `explain docker <sub>` để xem chi tiết từng tiểu lệnh.",
+    skip_run: false,
+};
+
+const DOCKER_PS: Explanation = Explanation {
+    name: "docker ps",
+    summary: "List container",
+    usage: "docker ps [-a] [-q] [-f FILTER] [--format FMT]",
+    flags: &[
+        ("-a / --all",        "list cả container đã stop"),
+        ("-q / --quiet",      "chỉ in container ID (cho script: `docker rm $(docker ps -aq)`)"),
+        ("-s / --size",       "kèm dung lượng"),
+        ("-n N",              "N container mới nhất"),
+        ("-l",                "container vừa tạo gần nhất"),
+        ("-f KEY=VAL",        "lọc: status=running, name=foo, label=app=web…"),
+        ("--format FMT",      "Go template (vd '{{.Names}}\\t{{.Status}}')"),
+        ("--no-trunc",        "không cắt cột"),
+    ],
+    examples: &[
+        ("docker ps",                                 "đang chạy"),
+        ("docker ps -a",                              "tất cả"),
+        ("docker ps -aq",                             "chỉ ID, dễ pipe"),
+        ("docker ps -f status=exited",                "chỉ đã exit"),
+        ("docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'", "format gọn"),
+    ],
+    note: "Cột mặc định: CONTAINER ID, IMAGE, COMMAND, CREATED, STATUS, PORTS, NAMES.",
+    skip_run: false,
+};
+
+const DOCKER_EXEC: Explanation = Explanation {
+    name: "docker exec",
+    summary: "Chạy lệnh trong container ĐANG CHẠY",
+    usage: "docker exec [-it] [-u USER] [-w DIR] [-e VAR=VAL] <container> <command> [args]",
+    flags: &[
+        ("-i / --interactive", "giữ STDIN mở (cho input)"),
+        ("-t / --tty",         "cấp pseudo-TTY (cho shell tương tác)"),
+        ("-it",                "combo phổ biến — shell interactive"),
+        ("-d / --detach",      "chạy background, không chờ"),
+        ("-u USER",            "chạy với user (vd 'root', 'node')"),
+        ("-w DIR",             "working directory bên trong container"),
+        ("-e VAR=VAL",         "biến môi trường tạm"),
+        ("--privileged",       "đặc quyền (NGUY HIỂM)"),
+    ],
+    examples: &[
+        ("docker exec -it payin_app sh",            "mở shell trong container"),
+        ("docker exec -it db psql -U postgres",     "psql interactive"),
+        ("docker exec api npm run migrate",         "chạy lệnh rồi thoát"),
+        ("docker exec -u root -it nginx bash",      "vào với quyền root"),
+        ("docker exec -e DEBUG=1 worker ./debug.sh","truyền env tạm"),
+    ],
+    note: "Container PHẢI đang chạy. Nếu đã stop → dùng `docker start` trước, hoặc `docker run` với image.\nContainer dùng `alpine` thường không có `bash` — dùng `sh`.",
+    skip_run: true,
+};
+
+const DOCKER_RUN: Explanation = Explanation {
+    name: "docker run",
+    summary: "Tạo + chạy container mới từ image",
+    usage: "docker run [options] <image> [command] [args]",
+    flags: &[
+        ("-d / --detach",       "chạy nền (daemon)"),
+        ("-it",                 "interactive + tty"),
+        ("--name NAME",         "đặt tên container (nếu không sẽ random)"),
+        ("--rm",                "tự xoá container khi exit (cho lệnh tạm)"),
+        ("-p H:C / --publish",  "map port HOST:CONTAINER (vd 8080:80)"),
+        ("-P",                  "map mọi expose port với port random ở host"),
+        ("-v H:C / --volume",   "mount HOST_PATH:CONT_PATH (or named volume)"),
+        ("-e VAR=VAL",          "biến môi trường"),
+        ("--env-file FILE",     "đọc env từ file"),
+        ("--network NET",       "kết nối vào network"),
+        ("--restart POLICY",    "no / on-failure / always / unless-stopped"),
+        ("-u USER",             "user chạy bên trong"),
+        ("-w DIR",              "working dir"),
+        ("--entrypoint CMD",    "ghi đè ENTRYPOINT"),
+        ("--memory / --cpus",   "giới hạn tài nguyên"),
+    ],
+    examples: &[
+        ("docker run --rm -it alpine sh",               "shell tạm, tự xoá"),
+        ("docker run -d --name web -p 8080:80 nginx",   "nginx nền, expose 8080"),
+        ("docker run -v $(pwd):/app -w /app node npm test", "test với mount cwd"),
+        ("docker run --env-file .env -d my_api:latest", "env từ file"),
+    ],
+    note: "`run` = `create` + `start`. Sau khi exit → container vẫn tồn tại (trừ khi có `--rm`).",
+    skip_run: true,
+};
+
+const DOCKER_BUILD: Explanation = Explanation {
+    name: "docker build",
+    summary: "Build image từ Dockerfile",
+    usage: "docker build [-t NAME:TAG] [-f Dockerfile] [build-args] <context>",
+    flags: &[
+        ("-t NAME:TAG",       "đặt tên + tag (có thể lặp nhiều `-t`)"),
+        ("-f Dockerfile",     "chỉ định Dockerfile khác file mặc định"),
+        ("--build-arg K=V",   "truyền ARG vào build"),
+        ("--target STAGE",    "chỉ build tới stage này (multi-stage)"),
+        ("--no-cache",        "không dùng cache layer"),
+        ("--pull",            "luôn pull base image mới nhất"),
+        ("--platform PLAT",   "build cho platform khác (vd linux/arm64)"),
+        ("--progress=plain",  "in log đầy đủ, không TUI"),
+    ],
+    examples: &[
+        ("docker build -t my_api:1.0 .",                  "build từ ./Dockerfile, tag 1.0"),
+        ("docker build -t my_api:1.0 -t my_api:latest .", "2 tag cùng lúc"),
+        ("docker build -f docker/Dockerfile.prod .",      "file Dockerfile khác"),
+        ("docker build --build-arg VERSION=1.2 .",        "truyền ARG"),
+        ("docker build --platform linux/arm64 -t app .",  "cross-build"),
+    ],
+    note: "`<context>` là thư mục được gửi vào daemon — tránh để `.` lớn. Dùng `.dockerignore` để bỏ qua file không cần.",
+    skip_run: true,
+};
+
+const DOCKER_IMAGES: Explanation = Explanation {
+    name: "docker images",
+    summary: "List image local",
+    usage: "docker images [-a] [-q] [-f FILTER] [REPOSITORY[:TAG]]",
+    flags: &[
+        ("-a",                "kể cả intermediate layer"),
+        ("-q",                "chỉ in image ID"),
+        ("-f dangling=true",  "image lơ lửng (không tag, không ref)"),
+        ("--format FMT",      "Go template"),
+        ("--no-trunc",        "không cắt"),
+    ],
+    examples: &[
+        ("docker images",                       "tất cả image"),
+        ("docker images nginx",                 "chỉ nginx"),
+        ("docker images -f dangling=true -q",   "ID image lơ lửng (để rmi)"),
+    ],
+    note: "Bí danh: `docker image ls`.\nXoá lơ lửng: `docker image prune` hoặc `docker rmi $(docker images -f dangling=true -q)`.",
+    skip_run: false,
+};
+
+const DOCKER_PULL: Explanation = Explanation {
+    name: "docker pull",
+    summary: "Tải image từ registry",
+    usage: "docker pull [OPTIONS] IMAGE[:TAG|@DIGEST]",
+    flags: &[
+        ("--platform PLAT", "tải bản cho platform khác (vd linux/amd64 trên Mac M1)"),
+        ("-a",              "tải MỌI tag của image (cẩn thận!)"),
+        ("--quiet",         "giảm log"),
+    ],
+    examples: &[
+        ("docker pull nginx",           "tag mặc định 'latest'"),
+        ("docker pull nginx:1.25",      "tag cụ thể"),
+        ("docker pull ghcr.io/owner/repo:sha", "registry private"),
+        ("docker pull --platform linux/amd64 mysql:8", "ép platform (Mac M1)"),
+    ],
+    note: "Đăng nhập registry private trước: `docker login <registry>`.",
+    skip_run: true,
+};
+
+const DOCKER_PUSH: Explanation = Explanation {
+    name: "docker push",
+    summary: "Đẩy image lên registry",
+    usage: "docker push IMAGE[:TAG]",
+    flags: &[
+        ("--all-tags / -a", "push tất cả tag của image"),
+        ("--quiet",         "giảm log"),
+    ],
+    examples: &[
+        ("docker push my_user/my_api:1.0",          "Docker Hub"),
+        ("docker push ghcr.io/owner/api:latest",    "GitHub Container Registry"),
+    ],
+    note: "Image phải đã được `docker login` vào registry tương ứng.\nĐặt tag matches registry: vd `ghcr.io/<owner>/<name>:<tag>`.",
+    skip_run: true,
+};
+
+const DOCKER_LOGS: Explanation = Explanation {
+    name: "docker logs",
+    summary: "Xem log container",
+    usage: "docker logs [-f] [--tail N] [-t] [--since TIME] <container>",
+    flags: &[
+        ("-f / --follow",       "follow log (như tail -f)"),
+        ("--tail N",            "chỉ N dòng cuối (default: all)"),
+        ("-t / --timestamps",   "in timestamp"),
+        ("--since 10m",         "log từ 10 phút trước"),
+        ("--since 2025-01-01",  "log từ ngày cụ thể"),
+        ("--until TIME",        "cho đến TIME"),
+        ("--details",           "kèm extra label"),
+    ],
+    examples: &[
+        ("docker logs my_api",              "tất cả log"),
+        ("docker logs -f --tail 100 web",   "100 dòng cuối + follow"),
+        ("docker logs --since 1h db",       "1 giờ gần đây"),
+        ("docker logs -t web 2>&1 | grep ERROR", "lọc lỗi (cả stdout + stderr)"),
+    ],
+    note: "Log = stdout + stderr của process chính trong container. Application ghi vào file bên trong sẽ KHÔNG hiện ở đây.",
+    skip_run: true,
+};
+
+const DOCKER_LIFECYCLE: Explanation = Explanation {
+    name: "docker stop / start / restart / kill / pause / unpause",
+    summary: "Quản lý vòng đời container",
+    usage: "docker <stop|start|restart|kill|pause|unpause> <container ...>",
+    flags: &[
+        ("stop",           "gửi SIGTERM rồi chờ 10s, sau đó SIGKILL"),
+        ("stop -t SECS",   "đợi SECS thay vì 10s"),
+        ("start",          "khởi động lại container đã stop"),
+        ("start -a",       "+ attach stdout/stderr"),
+        ("start -i",       "+ attach stdin (interactive)"),
+        ("restart",        "= stop + start"),
+        ("restart -t SECS","đợi SECS trước khi kill"),
+        ("kill",           "gửi SIGKILL ngay (không lịch sự)"),
+        ("kill -s SIGNAL", "gửi signal khác (vd HUP, USR1)"),
+        ("pause / unpause","đóng băng / mở băng process (SIGSTOP/SIGCONT)"),
+    ],
+    examples: &[
+        ("docker stop my_api",                  "dừng lịch sự"),
+        ("docker stop -t 30 my_api",            "đợi 30s trước khi force"),
+        ("docker restart $(docker ps -q)",      "restart mọi container đang chạy"),
+        ("docker kill -s HUP nginx",            "gửi SIGHUP cho nginx reload config"),
+    ],
+    note: "Container exit khi process chính exit. `start` chỉ chạy lại — KHÔNG tạo mới.",
+    skip_run: true,
+};
+
+const DOCKER_RM: Explanation = Explanation {
+    name: "docker rm",
+    summary: "Xoá container (đã stop)",
+    usage: "docker rm [-f] [-v] <container ...>",
+    flags: &[
+        ("-f / --force",  "force xoá kể cả container đang chạy (= stop + rm)"),
+        ("-v / --volumes","xoá luôn anonymous volume gắn với container"),
+        ("-l / --link",   "xoá link, không xoá container"),
+    ],
+    examples: &[
+        ("docker rm web db",                          "xoá 2 container"),
+        ("docker rm -f $(docker ps -aq)",             "force xoá MỌI container (cẩn thận!)"),
+        ("docker rm $(docker ps -q -f status=exited)","xoá container đã exit"),
+        ("docker rm -v abc123",                       "xoá + volume anonymous"),
+    ],
+    note: "Container chạy: phải `docker stop` trước hoặc dùng `-f`.\nLưu trữ trong volume named KHÔNG bị xoá theo (chỉ anonymous).",
+    skip_run: true,
+};
+
+const DOCKER_RMI: Explanation = Explanation {
+    name: "docker rmi",
+    summary: "Xoá image local",
+    usage: "docker rmi [-f] <image ...>",
+    flags: &[
+        ("-f / --force",  "force — kể cả khi có container tag từ image này"),
+        ("--no-prune",    "không xoá parent layer chưa tag"),
+    ],
+    examples: &[
+        ("docker rmi nginx:1.20",                              "xoá 1 image"),
+        ("docker rmi $(docker images -q -f dangling=true)",    "xoá image lơ lửng"),
+        ("docker image prune",                                  "(khuyên hơn) xoá lơ lửng tự động"),
+        ("docker image prune -a",                               "xoá MỌI image không có container đang dùng"),
+    ],
+    note: "Bí danh: `docker image rm`.",
+    skip_run: true,
+};
+
+const DOCKER_INSPECT: Explanation = Explanation {
+    name: "docker inspect",
+    summary: "Metadata chi tiết (JSON) của container / image / volume / network",
+    usage: "docker inspect [--format FMT] [-s] <object ...>",
+    flags: &[
+        ("--format FMT",  "Go template — trích trường cụ thể, gọn hơn JSON đầy đủ"),
+        ("-s / --size",   "kèm size cho container"),
+        ("--type TYPE",   "ép type: container/image/network/volume"),
+    ],
+    examples: &[
+        ("docker inspect my_api",                                       "JSON đầy đủ"),
+        ("docker inspect -f '{{.State.Status}}' my_api",                "chỉ status"),
+        ("docker inspect -f '{{.NetworkSettings.IPAddress}}' my_api",   "chỉ IP"),
+        ("docker inspect -f '{{.Config.Env}}' my_api",                  "env var của container"),
+        ("docker inspect -f '{{json .Mounts}}' my_api | jq",            "mount points qua jq"),
+    ],
+    note: "Khám phá trường: `docker inspect <obj> | jq '. | keys'`.",
+    skip_run: false,
+};
+
+const DOCKER_NETWORK: Explanation = Explanation {
+    name: "docker network",
+    summary: "Quản lý network",
+    usage: "docker network <ls | create | rm | inspect | connect | disconnect | prune>",
+    flags: &[
+        ("ls",                       "list network"),
+        ("create NAME",              "tạo network mới (default: bridge)"),
+        ("create --driver overlay",  "swarm overlay network"),
+        ("create --subnet 10.5.0.0/24 ", "custom subnet"),
+        ("rm NAME",                  "xoá"),
+        ("inspect NAME",             "chi tiết"),
+        ("connect NET CONTAINER",    "gắn container vào network"),
+        ("disconnect NET CONTAINER", "gỡ container ra"),
+        ("prune",                    "xoá network không dùng"),
+    ],
+    examples: &[
+        ("docker network ls",                              "list"),
+        ("docker network create app_net",                  "tạo network"),
+        ("docker run --network app_net --name db postgres","container vào network"),
+        ("docker network inspect app_net",                 "chi tiết + container đang ở đó"),
+    ],
+    note: "Container cùng network thấy nhau qua tên (DNS). Default network `bridge` KHÔNG có DNS giữa các container.",
+    skip_run: false,
+};
+
+const DOCKER_VOLUME: Explanation = Explanation {
+    name: "docker volume",
+    summary: "Quản lý volume (lưu trữ bền vững)",
+    usage: "docker volume <ls | create | rm | inspect | prune>",
+    flags: &[
+        ("ls",            "list volume"),
+        ("create NAME",   "tạo named volume"),
+        ("rm NAME",       "xoá"),
+        ("inspect NAME",  "chi tiết (mountpoint, driver, …)"),
+        ("prune",         "xoá volume không có container nào dùng"),
+        ("-f label=K=V",  "lọc theo label"),
+    ],
+    examples: &[
+        ("docker volume ls",                              "list"),
+        ("docker volume create db_data",                  "tạo"),
+        ("docker run -v db_data:/var/lib/postgresql postgres", "mount vào container"),
+        ("docker volume inspect db_data",                 "xem mountpoint"),
+        ("docker volume prune",                           "dọn không dùng"),
+    ],
+    note: "Khác bind-mount (`-v /host/path:/cont/path`): named volume do Docker quản lý, di động + dễ backup.",
+    skip_run: false,
+};
+
+const DOCKER_COMPOSE: Explanation = Explanation {
+    name: "docker compose",
+    summary: "Quản lý stack multi-container (docker-compose.yml)",
+    usage: "docker compose <up | down | ps | logs | exec | build | pull | restart | ...>",
+    flags: &[
+        ("up",             "tạo + chạy stack"),
+        ("up -d",          "background"),
+        ("up --build",     "build lại image trước khi chạy"),
+        ("up --force-recreate", "tạo lại container kể cả không thay đổi"),
+        ("down",           "stop + xoá container + network (giữ volume)"),
+        ("down -v",        "xoá luôn volume"),
+        ("ps",             "list service trong stack"),
+        ("logs -f [SVC]",  "follow log (mặc định tất cả)"),
+        ("exec SVC CMD",   "= docker exec, dùng tên service"),
+        ("restart [SVC]",  "restart service"),
+        ("build",          "chỉ build, không chạy"),
+        ("pull",           "pull lại image"),
+        ("config",         "validate + in compose file đã merge"),
+        ("-f FILE",        "compose file khác mặc định"),
+        ("-p NAME",        "đặt project name"),
+        ("--profile NAME", "chạy service trong profile"),
+    ],
+    examples: &[
+        ("docker compose up -d",            "start stack nền"),
+        ("docker compose ps",               "list service"),
+        ("docker compose logs -f api",      "follow log service 'api'"),
+        ("docker compose exec db psql -U postgres", "psql trong service 'db'"),
+        ("docker compose down -v",          "stop + xoá hết kể cả volume"),
+        ("docker compose -f docker-compose.prod.yml up -d", "file riêng"),
+    ],
+    note: "Lệnh mới (compose v2) — tích hợp vào docker CLI.\nCũ: `docker-compose` (có dấu gạch) — cú pháp tương đương.\nMặc định đọc `docker-compose.yml` hoặc `compose.yml` ở cwd.",
+    skip_run: true,
+};
+
+const DOCKER_CP: Explanation = Explanation {
+    name: "docker cp",
+    summary: "Copy file giữa container và host",
+    usage: "docker cp [-a] <src> <dst>  (src/dst có dạng CONTAINER:PATH)",
+    flags: &[
+        ("-a / --archive", "giữ uid/gid/mtime"),
+        ("-L",             "follow symlink"),
+    ],
+    examples: &[
+        ("docker cp my_api:/var/log/app.log .",       "copy từ container ra host"),
+        ("docker cp ./config.yml my_api:/etc/app/",   "copy từ host vào container"),
+        ("docker cp my_api:/data ./backup",           "copy cả thư mục"),
+    ],
+    note: "Container không cần đang chạy — `docker cp` đọc/ghi trực tiếp filesystem.",
+    skip_run: true,
+};
+
+const DOCKER_LOGIN: Explanation = Explanation {
+    name: "docker login / logout",
+    summary: "Đăng nhập / đăng xuất registry",
+    usage: "docker login [REGISTRY] [-u USER] [-p PASS] | docker logout [REGISTRY]",
+    flags: &[
+        ("-u USER",        "username"),
+        ("-p PASS",        "password (KHÔNG khuyên — hiện trong history; dùng stdin)"),
+        ("--password-stdin", "đọc password từ stdin (an toàn)"),
+        ("REGISTRY",       "default: docker.io. Khác: ghcr.io, registry.gitlab.com, …"),
+    ],
+    examples: &[
+        ("docker login",                                                "Docker Hub interactive"),
+        ("echo $GHCR_TOKEN | docker login ghcr.io -u alice --password-stdin", "GHCR an toàn"),
+        ("docker logout ghcr.io",                                       "xoá credentials"),
+    ],
+    note: "Credentials lưu ở `~/.docker/config.json` (hoặc keychain trên macOS).",
+    skip_run: true,
+};
+
+const DOCKER_SYSTEM: Explanation = Explanation {
+    name: "docker system / docker prune",
+    summary: "Thông tin hệ thống & dọn dẹp resource",
+    usage: "docker system <df | info | prune | events>",
+    flags: &[
+        ("df",                "dung lượng image/container/volume/cache đang chiếm"),
+        ("info",              "thông tin daemon (storage driver, version, …)"),
+        ("prune",             "xoá: container đã stop + network không dùng + dangling image"),
+        ("prune -a",          "xoá thêm: image không có container đang dùng"),
+        ("prune --volumes",   "xoá luôn volume không dùng (CẨN THẬN — mất data!)"),
+        ("events",            "stream realtime mọi sự kiện Docker"),
+    ],
+    examples: &[
+        ("docker system df",                            "xem đang chiếm bao nhiêu"),
+        ("docker system prune",                         "dọn cơ bản (an toàn)"),
+        ("docker system prune -a --volumes",            "dọn tới đáy (nguy hiểm)"),
+        ("docker image prune  /  docker container prune  /  docker volume prune", "dọn theo resource"),
+    ],
+    note: "Trên dev machine, `system prune` định kỳ giải phóng đáng kể dung lượng.",
+    skip_run: true,
+};
+
+const DOCKER_TAG: Explanation = Explanation {
+    name: "docker tag",
+    summary: "Tạo tên/tag mới cho image (alias)",
+    usage: "docker tag <source[:tag]> <target[:tag]>",
+    flags: &[
+        ("(không có cờ)", "chỉ truyền 2 tham số: image gốc + image đích"),
+    ],
+    examples: &[
+        ("docker tag my_api:1.0 my_api:latest",        "alias 'latest'"),
+        ("docker tag my_api:1.0 ghcr.io/me/my_api:1.0","đổi sang dạng registry"),
+    ],
+    note: "`tag` không tạo image mới — chỉ thêm 1 ref trỏ tới image gốc.\nSau tag cần `docker push` để đẩy lên registry.",
+    skip_run: true,
 };
