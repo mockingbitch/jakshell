@@ -70,8 +70,8 @@ Binary release ~1.4 MB, startup ~10 ms.
 
 ```bash
 # 1) Clone (nếu lấy từ git)
-git clone <repo-url> JakShell
-cd JakShell
+git clone https://github.com/mockingbitch/jakshell.git
+cd jakshell
 
 # 2) Build + cài đặt
 ./install.sh
