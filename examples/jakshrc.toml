@@ -1,0 +1,35 @@
+# Cấu hình JakShell — đặt tại ~/.jakshrc.toml
+# Mọi mục đều tuỳ chọn. Xoá hoặc comment để dùng mặc định.
+
+# Khuôn prompt. Các biến: {accent} {success} {error} {dim} {reset}
+# {cwd} {cwd_short} {git} {arrow} {status}
+prompt = "{accent}{cwd_short}{reset}{git} {arrow} "
+
+[theme]
+accent = "bright_cyan"
+success = "bright_green"
+error = "bright_red"
+dim = "bright_black"
+arrow = "❯"
+git_branch_icon = " "
+use_color = true
+
+[aliases]
+ll = "ls -lah"
+la = "ls -A"
+gs = "git status"
+gd = "git diff"
+gl = "git log --oneline --graph --decorate -20"
+tlf = "tail -f"
+
+# Bí danh tiếng Việt — thân thiện cho lowtech user
+tim = "jak find"
+dondep = "jak clean"
+napnhat = "jak update"
+mo = "jak open"
+maytinh = "jak sysinfo"
+giaithich = "explain"
+
+[env]
+EDITOR = "vim"
+LANG = "en_US.UTF-8"

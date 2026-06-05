@@ -1,0 +1,10 @@
+# Script khởi động JakShell — đặt tại ~/.jakshrc
+# Được chạy SAU khi đã đọc ~/.jakshrc.toml.
+# Mỗi dòng là một lệnh shell hợp lệ (alias, export, source, ...).
+
+# Ví dụ: thêm thư mục bin cá nhân vào PATH
+export PATH=$HOME/.local/bin:$PATH
+
+# Ví dụ alias ngắn ngoài file TOML
+alias c=clear
+alias ..=cd ..
