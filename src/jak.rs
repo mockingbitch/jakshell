@@ -72,6 +72,8 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
         "weather" => weather(&rest),
         "ip" => ip(),
         "git" => git_shortcut(shell, &rest),
+        "self-update" | "upgrade" | "selfupdate" => self_update(shell),
+        "version" | "--version" | "-v" | "changelog" | "whatsnew" => version_info(&rest),
         _ => {
             // Thử bookmark
             if crate::bookmark::lookup(sub).is_some() {
@@ -100,6 +102,8 @@ fn help() -> Result<i32> {
         ("ip", "In địa chỉ IP nội bộ và public"),
         ("weather [thành phố]", "Xem thời tiết (qua wttr.in)"),
         ("git <save|sync|undo|wip|...>", "Workflow git: gõ `jak git` để xem chi tiết"),
+        ("self-update", "Cập nhật JakShell: git pull + ./install.sh tự động"),
+        ("version [all]", "Thông tin phiên bản + CHANGELOG (thêm `all` để xem toàn bộ)"),
     ];
     for (cmd, desc) in items {
         println!("  \x1b[36m{:32}\x1b[0m {}", cmd, desc);
@@ -779,6 +783,214 @@ fn weather(args: &[&str]) -> Result<i32> {
     };
     let hint = "Cần `curl` để lấy thời tiết từ wttr.in.";
     Ok(run_or_warn("curl", &["-s", &url], hint))
+}
+
+// ─── jak self-update ──────────────────────────────────────────────────────────
+
+fn source_path_file() -> std::path::PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".config").join("jaksh").join("source-path"))
+        .unwrap_or_else(|| std::path::PathBuf::from("source-path"))
+}
+
+fn self_update(_shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+    let path_file = source_path_file();
+    let source = match std::fs::read_to_string(&path_file) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            print_manual_update_help(None);
+            return Ok(1);
+        }
+    };
+    if source.is_empty() {
+        print_manual_update_help(None);
+        return Ok(1);
+    }
+    let path = std::path::Path::new(&source);
+    if !path.exists() {
+        print_manual_update_help(Some(&format!(
+            "thư mục source đã ghi không còn tồn tại: {}",
+            source
+        )));
+        return Ok(1);
+    }
+    if !path.join(".git").exists() {
+        print_manual_update_help(Some(&format!(
+            "{} không phải git repo (đã bị xoá .git?)",
+            source
+        )));
+        return Ok(1);
+    }
+
+    println!("\x1b[1m▸ Cập nhật JakShell\x1b[0m");
+    println!("  \x1b[2msource:\x1b[0m {}", source);
+    println!();
+
+    // 1) git pull --rebase
+    println!("\x1b[2m$ git -C {} fetch --tags\x1b[0m", source);
+    if !has_cmd("git") {
+        warn_missing("git", "Cần git để self-update.");
+        return Ok(127);
+    }
+    let _ = Command::new("git").args(["-C", &source, "fetch", "--tags"]).status();
+
+    println!("\x1b[2m$ git -C {} pull --rebase\x1b[0m", source);
+    let s1 = Command::new("git")
+        .args(["-C", &source, "pull", "--rebase"])
+        .status()?;
+    if !s1.success() {
+        eprintln!(
+            "\x1b[33m⚠ git pull thất bại. Fix conflict / commit local rồi thử lại.\x1b[0m"
+        );
+        return Ok(s1.code().unwrap_or(1));
+    }
+
+    // 2) Chạy install.sh
+    let install = path.join("install.sh");
+    if !install.exists() {
+        eprintln!("\x1b[31m✗ không thấy install.sh trong source — cài bằng tay.\x1b[0m");
+        return Ok(1);
+    }
+    println!("\n\x1b[2m$ ./install.sh --yes\x1b[0m");
+    let s2 = Command::new("bash")
+        .arg(&install)
+        .arg("--yes")
+        .current_dir(path)
+        .status()?;
+    if s2.success() {
+        println!();
+        let old_version = env!("JAKSH_VERSION");
+        let new_version = read_new_version(&source);
+        match new_version {
+            Some(ref nv) if nv != old_version => {
+                println!(
+                    "\x1b[32m✓\x1b[0m Đã cập nhật: \x1b[2m{}\x1b[0m → \x1b[1m\x1b[32m{}\x1b[0m",
+                    old_version, nv
+                );
+            }
+            _ => println!("\x1b[32m✓\x1b[0m Đã cài lại JakShell (cùng version)."),
+        }
+        // In phần CHANGELOG của bản mới (đọc từ source repo vừa pull)
+        let changelog_path = path.join("CHANGELOG.md");
+        if let Ok(content) = std::fs::read_to_string(&changelog_path) {
+            print_latest_changelog(&content);
+        }
+        println!(
+            "\n\x1b[2mMở terminal mới để dùng bản mới.\x1b[0m"
+        );
+    }
+    Ok(s2.code().unwrap_or(0))
+}
+
+/// Đọc version mới từ source repo (sau khi pull) bằng `git describe`.
+fn read_new_version(source: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", source, "describe", "--tags", "--always", "--dirty=-dirty"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// In phần đầu (section mới nhất) của CHANGELOG.md.
+fn print_latest_changelog(content: &str) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start: Option<usize> = None;
+    let mut end: usize = lines.len();
+    for (i, l) in lines.iter().enumerate() {
+        if l.starts_with("## ") {
+            if start.is_none() {
+                start = Some(i);
+            } else {
+                end = i;
+                break;
+            }
+        }
+    }
+    let Some(s) = start else { return };
+    println!();
+    println!("\x1b[1m📝 Có gì mới trong bản này:\x1b[0m");
+    println!();
+    for line in &lines[s..end] {
+        println!("{}", line);
+    }
+}
+
+// ─── jak version / jak changelog ──────────────────────────────────────────────
+
+/// CHANGELOG được nhúng vào binary lúc compile — không cần source repo để xem.
+const EMBEDDED_CHANGELOG: &str = include_str!("../CHANGELOG.md");
+
+fn version_info(args: &[&str]) -> Result<i32> {
+    let bold = "\x1b[1m";
+    let cyan = "\x1b[36m";
+    let bright_cyan = "\x1b[96m";
+    let yellow = "\x1b[33m";
+    let dim = "\x1b[2m";
+    let reset = "\x1b[0m";
+
+    // ─── Khối thông tin version ───
+    println!(
+        "{bold}{bc}JakShell{reset}  {cyan}{ver}{reset}",
+        bc = bright_cyan,
+        ver = env!("JAKSH_VERSION")
+    );
+    println!();
+    println!("  {dim}Commit:{reset}      {}", env!("JAKSH_COMMIT_HASH"));
+    println!("  {dim}Commit date:{reset} {}", env!("JAKSH_COMMIT_DATE"));
+    println!("  {dim}Built:{reset}       {}", env!("JAKSH_BUILD_DATE"));
+    println!("  {dim}Rust:{reset}        {}", env!("JAKSH_RUSTC"));
+    println!(
+        "  {dim}Target:{reset}      {}-{}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    );
+    println!();
+    println!("  {dim}Author:{reset}      {bold}Jarvis Phong Tran{reset}");
+    println!("  {dim}Repo:{reset}        https://github.com/mockingbitch/jakshell");
+    println!(
+        "  {dim}Update:{reset}      {y}jak self-update{reset}",
+        y = yellow
+    );
+
+    // ─── Khối CHANGELOG ───
+    let show_all = args.first().map(|s| *s == "all" || *s == "full").unwrap_or(false);
+    println!();
+    println!("{dim}{}{reset}", "─".repeat(56));
+    if show_all {
+        print!("{}", EMBEDDED_CHANGELOG);
+    } else {
+        print_latest_changelog(EMBEDDED_CHANGELOG);
+        println!();
+        println!("{dim}(gõ `jak version all` để xem toàn bộ CHANGELOG){reset}");
+    }
+    Ok(0)
+}
+
+fn print_manual_update_help(reason: Option<&str>) {
+    eprintln!("\x1b[33m⚠ self-update không sẵn sàng.\x1b[0m");
+    if let Some(r) = reason {
+        eprintln!("  \x1b[2mLý do:\x1b[0m {}", r);
+    } else {
+        eprintln!(
+            "  \x1b[2mLý do:\x1b[0m chưa có ~/.config/jaksh/source-path (cài bằng cách khác?)."
+        );
+    }
+    eprintln!("\nCập nhật thủ công:");
+    eprintln!("  \x1b[36mcd <thư-mục-jakshell-đã-clone>\x1b[0m");
+    eprintln!("  \x1b[36mgit pull --rebase\x1b[0m");
+    eprintln!("  \x1b[36m./install.sh\x1b[0m");
+    eprintln!(
+        "\nHoặc clone mới:"
+    );
+    eprintln!(
+        "  \x1b[36mgit clone https://github.com/mockingbitch/jakshell.git\x1b[0m"
+    );
+    eprintln!("  \x1b[36mcd jakshell && ./install.sh\x1b[0m");
 }
 
 // ─── jak git shortcuts ────────────────────────────────────────────────────────

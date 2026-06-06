@@ -26,6 +26,7 @@ Gõ ? hoặc help bất cứ lúc nào.
   - [`jak <…>` — tiện ích JakShell](#jak--tiện-ích-jakshell)
   - [`jak find` — tìm kiếm tự nhiên](#jak-find--tìm-kiếm-tự-nhiên)
   - [`jak git` — workflow git rút gọn](#jak-git--workflow-git-rút-gọn)
+  - [`jak version` & `jak self-update`](#jak-version--jak-self-update)
   - [`bookmark` — đặt tên cho lệnh dài](#bookmark--đặt-tên-cho-lệnh-dài)
 - [Prompt thông minh](#prompt-thông-minh)
 - [Đo thời gian thực thi](#đo-thời-gian-thực-thi)
@@ -51,8 +52,9 @@ Gõ ? hoặc help bất cứ lúc nào.
 - **Đo thời gian thực thi**: dòng `⏱ X ms` sau mỗi lệnh, kèm exit code khi != 0.
 - **Did-you-mean**: gõ sai lệnh → gợi ý lệnh đúng (jaro-winkler).
 - **Banner chào hỏi theo giờ**: 🌅 sáng / ☀️ trưa / 🌤 chiều / 🌆 tối / 🌙 đêm khuya + 1 mẹo ngẫu nhiên.
-- **Themes dựng sẵn**: `ocean`, `forest`, `sunset`, `mono`, `default`. Đổi nóng bằng `jak theme <tên>`.
+- **17 theme dựng sẵn**: `ocean`, `forest`, `sunset`, `mono`, `dracula`, `nord`, `monokai`, `solarized`, `gruvbox`, `tokyo-night`, `catppuccin`, `rose-pine`, `cyberpunk`, `retro`, `paper`, `light`, `default`. `jak theme <tên>` lưu lựa chọn vĩnh viễn.
 - **Tab completion** cho lệnh, alias, builtin, tiểu lệnh `jak …` / `bookmark` / `explain …`, đường dẫn và PATH binary.
+- **`jak version`** — info chi tiết về binary (commit, build date, rustc) + CHANGELOG nhúng sẵn. **`jak self-update`** — pull + cài lại trong 1 lệnh.
 - **Cấu hình TOML**: `~/.jakshrc.toml` cho theme / prompt / alias / env / timing / greeting; `~/.jakshrc` script khởi động.
 
 Binary release ~1.4 MB, startup ~10 ms.
@@ -87,6 +89,20 @@ cd jakshell
 ```bash
 ~/.local/bin/jaksh
 ```
+
+### Cập nhật bản mới
+
+```bash
+# Cách 1: tự động (khuyên dùng)
+jak self-update
+
+# Cách 2: thủ công
+cd /path/to/jakshell        # thư mục đã clone
+git pull --rebase
+./install.sh
+```
+
+`jak self-update` đọc đường dẫn source đã lưu tại `~/.config/jaksh/source-path` (do `install.sh` ghi), chạy `git pull --rebase` rồi `./install.sh --yes`. Mở terminal mới để dùng bản vừa cập nhật.
 
 ### Build thủ công (không dùng install.sh)
 
@@ -253,6 +269,50 @@ jak git help
 | `jak git clean-branches` | Xoá branch local đã merged (có xác nhận) |
 
 Mỗi bước in `$ git …` trước khi chạy — bạn luôn biết shortcut đang làm gì.
+
+---
+
+### `jak version` & `jak self-update`
+
+**`jak version`** — in thông tin chi tiết về phiên bản đang chạy + section CHANGELOG mới nhất:
+
+```
+JakShell  v1.0.1
+
+  Commit:      a1b2c3d
+  Commit date: 2026-06-06 13:23:29 +0700
+  Built:       2026-06-06 06:34:30 UTC
+  Rust:        rustc 1.96.0
+  Target:      aarch64-macos
+
+  Author:      Jarvis Phong Tran
+  Repo:        https://github.com/mockingbitch/jakshell
+  Update:      jak self-update
+
+──────────────────────────────────────────
+📝 Có gì mới trong bản này:
+## [v1.0.1] — ...
+```
+
+- `jak version` — version info + section CHANGELOG mới nhất
+- `jak version all` — version info + toàn bộ CHANGELOG
+- Bí danh: `jak --version`, `jak -v`, `jak changelog`, `jak whatsnew`
+- CHANGELOG được **nhúng vào binary** (`include_str!`) — không cần source repo để xem.
+
+**`jak self-update`** — cập nhật JakShell tự động:
+
+```bash
+jak self-update
+```
+
+Quy trình:
+1. Đọc đường dẫn source từ `~/.config/jaksh/source-path` (do `install.sh` lưu lúc cài).
+2. Chạy `git fetch --tags` → `git pull --rebase`.
+3. Chạy `./install.sh --yes` để rebuild + cài lại binary.
+4. In `Đã cập nhật: vX.Y.Z → vA.B.C` + section CHANGELOG mới nhất.
+5. Nhắc mở terminal mới để dùng bản vừa update.
+
+Nếu thư mục source mất hoặc chưa có file `source-path`, lệnh sẽ in hướng dẫn cập nhật thủ công.
 
 ---
 
@@ -438,24 +498,36 @@ Mở terminal mới — JakShell sẽ là shell login.
 
 ## Versioning
 
-Phiên bản hiển thị trong banner & `jak help` được sinh ở **build time** từ git:
+JakShell nhúng version & build info vào binary lúc compile qua `build.rs`. Xem chi tiết bằng:
 
+```bash
+jak version          # info ngắn + CHANGELOG mới nhất
+jak version all      # + toàn bộ CHANGELOG
+```
+
+In ra: tag git, commit SHA, commit date, build date, rustc, target, tác giả, link repo.
+
+Phiên bản (hiển thị trong banner) được sinh từ:
 ```
 git describe --tags --always --dirty=-dirty
 ```
 
-Quy tắc:
-- Có tag: `v0.2.0` → hiện `v0.2.0`
-- Có tag + commit thêm: `v0.2.0-3-g91b4d81` (3 commit sau tag v0.2.0)
-- Working tree dirty: `v0.2.0-3-g91b4d81-dirty`
+Quy tắc đầu ra:
+- Có tag, working tree sạch: `v1.0.1` → hiện `v1.0.1`
+- Có tag + commit thêm: `v1.0.1-3-g91b4d81` (3 commit sau tag v1.0.1)
+- Working tree dirty: `v1.0.1-dirty` (binary KHÔNG khớp commit tag — có file modified chưa commit)
 - Repo chưa có tag: short SHA, vd `91b4d81`
 - Không có git: fallback `Cargo.toml`'s `version`
 
 Để release version mới:
 ```bash
-git tag -a v0.2.0 -m "Release 0.2.0"
+git add -A && git commit -m "..."
+git tag -a v1.0.2 -m "Release 1.0.2"
 cargo build --release
-./target/release/jaksh   # banner sẽ hiện v0.2.0
+./target/release/jaksh   # banner & jak version sẽ hiện v1.0.2
+
+git push && git push origin v1.0.2
+gh release create v1.0.2 --notes-file CHANGELOG.md
 ```
 
 ---

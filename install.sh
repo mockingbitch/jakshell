@@ -13,6 +13,10 @@
 
 set -eu
 
+# Đường dẫn tuyệt đối tới repo (= thư mục chứa install.sh)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # ─── colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
     G="\033[32m"; Y="\033[33m"; R="\033[31m"; C="\033[36m"
@@ -248,6 +252,10 @@ fi
 mkdir -p "$PREFIX"
 cp -f "$BIN" "$PREFIX/jaksh"
 ok "Đã cài: ${B}$PREFIX/jaksh${X}"
+
+# Lưu đường dẫn source repo để `jak self-update` biết nơi cần `git pull` sau này.
+mkdir -p "$HOME/.config/jaksh"
+printf '%s\n' "$SCRIPT_DIR" > "$HOME/.config/jaksh/source-path"
 
 # ─── 7) Tạo sample config nếu chưa có ─────────────────────────────────────────
 if [ ! -f "$HOME/.jakshrc.toml" ] && [ -f "examples/jakshrc.toml" ]; then

@@ -46,7 +46,7 @@ impl Completer for ShellHelper {
                     });
                 }
             }
-            for sub in ["clean", "backup", "update", "find", "open", "sysinfo", "theme", "weather", "ip", "help", "git"] {
+            for sub in ["clean", "backup", "update", "self-update", "version", "find", "open", "sysinfo", "theme", "weather", "ip", "help", "git"] {
                 let full = format!("jak {}", sub);
                 if full.starts_with(frag) {
                     results.push(Pair {

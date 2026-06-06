@@ -7,6 +7,26 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.1] — Tự cập nhật & thông tin version
+
+### Đã thêm
+
+- **`jak version`** — in thông tin chi tiết phiên bản: tag git, commit SHA, commit date, build date (UTC), rustc, target triple, tác giả, link repo. Kèm luôn section CHANGELOG mới nhất.
+- **`jak version all`** — như trên + toàn bộ CHANGELOG (nhúng vào binary qua `include_str!`).
+- **`jak self-update`** (alias: `jak upgrade`, `jak selfupdate`) — tự `git pull --rebase` ở thư mục source rồi chạy `./install.sh --yes`. Sau khi xong tự hiện section CHANGELOG mới.
+- **`install.sh`** lưu đường dẫn source vào `~/.config/jaksh/source-path` để `jak self-update` biết nơi pull.
+- **`build.rs`** mở rộng: nhúng thêm `JAKSH_COMMIT_HASH`, `JAKSH_COMMIT_DATE`, `JAKSH_BUILD_DATE`, `JAKSH_RUSTC` vào binary.
+
+### Đã sửa
+
+- `install.sh` thiếu định nghĩa `SCRIPT_DIR` ở phiên bản rewrite trước — đã thêm lại.
+
+### Tài liệu
+
+- README có section "Cập nhật bản mới" với 2 cách (tự động qua `jak self-update`, hoặc thủ công).
+
+---
+
 ## [v1.0.0] — Phát hành đầu tiên 🎉
 
 > Bản chính thức đầu tiên của **JakShell** — một shell viết bằng Rust cho macOS & Linux, vừa giữ cú pháp POSIX vừa thêm bộ công cụ tiếng Việt thân thiện cho cả developer và người dùng phổ thông.
@@ -196,4 +216,5 @@ jak theme list          # chọn giao diện
 
 ---
 
+[v1.0.1]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.1
 [v1.0.0]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.0
