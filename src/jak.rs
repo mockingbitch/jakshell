@@ -87,10 +87,8 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
 }
 
 fn help() -> Result<i32> {
-    println!(
-        "\x1b[1mjak\x1b[0m \x1b[2m— bộ lệnh tiện ích JakShell {}\x1b[0m\n",
-        env!("JAKSH_VERSION")
-    );
+    crate::info::print_banner();
+    println!("\x1b[1mjak\x1b[0m \x1b[2m— bộ lệnh tiện ích\x1b[0m\n");
     let items = [
         ("clean", "Xoá file tạm và cache trong ~/.cache, /tmp do bạn sở hữu"),
         ("backup <thư_mục>", "Nén thư mục thành .tar.gz với tên-ngày-giờ"),

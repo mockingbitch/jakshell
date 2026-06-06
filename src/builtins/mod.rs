@@ -349,7 +349,8 @@ fn kill(args: &[&str]) -> Result<i32> {
 }
 
 fn help() -> Result<i32> {
-    println!("\x1b[1mJakShell — trợ giúp\x1b[0m");
+    crate::info::print_banner();
+    println!("\x1b[1mTrợ giúp nhanh\x1b[0m");
     println!();
     println!("\x1b[36m▸ Tiện ích JakShell (gõ `jak help` để xem chi tiết):\x1b[0m");
     println!("  jak clean             dọn cache & file tạm");

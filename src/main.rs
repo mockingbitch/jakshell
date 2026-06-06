@@ -6,6 +6,7 @@ mod executor;
 mod expand;
 mod explain;
 mod findcmd;
+mod info;
 mod jak;
 mod lexer;
 mod parser;

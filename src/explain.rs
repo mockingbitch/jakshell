@@ -349,6 +349,7 @@ fn run_live(
 // ─── list_all ─────────────────────────────────────────────────────────────────
 
 fn list_all() {
+    crate::info::print_banner();
     println!("\x1b[1mexplain — các lệnh đã có chú thích\x1b[0m\n");
     let groups: &[(&str, &[&str])] = &[
         ("Điều hướng & thông tin",
