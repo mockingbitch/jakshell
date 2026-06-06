@@ -30,6 +30,37 @@ use crate::completion::ShellHelper;
 use crate::shell::Shell;
 
 fn main() -> Result<()> {
+    // ── CLI args parsing ──────────────────────────────────────────────────────
+    // Hỗ trợ subset của bash/zsh để JakShell dùng được làm shell trong VSCode,
+    // task runner, CI, login shell, v.v.
+    //
+    //   jaksh                          → REPL tương tác (mặc định)
+    //   jaksh -c "cmd"                 → chạy 1 lệnh rồi exit (không banner/timing)
+    //   jaksh script.sh [args...]      → chạy script từng dòng rồi exit
+    //   jaksh -l / --login             → flag tương thích (no-op, accept không lỗi)
+    //   jaksh -i / --interactive       → ép interactive (mặc định khi không có -c/script)
+    //   jaksh -V / --version           → in version rồi exit
+    //   jaksh -h / --help              → in help rồi exit
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = parse_cli(&args);
+    match mode {
+        CliMode::Help => {
+            print_cli_help();
+            return Ok(());
+        }
+        CliMode::Version => {
+            println!("JakShell {}", env!("JAKSH_VERSION"));
+            return Ok(());
+        }
+        CliMode::Command(cmd) => {
+            return run_oneshot(&cmd);
+        }
+        CliMode::Script(path, script_args) => {
+            return run_script(&path, &script_args);
+        }
+        CliMode::Interactive => {} // tiếp tục xuống REPL bên dưới
+    }
+
     let shell = Rc::new(RefCell::new(Shell::new()?));
 
     if let Err(e) = config::load(&shell) {
@@ -327,4 +358,124 @@ fn pick_tip() -> &'static str {
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
     TIPS[nanos % TIPS.len()]
+}
+
+// ─── CLI mode parsing ─────────────────────────────────────────────────────────
+
+enum CliMode {
+    /// REPL tương tác (mặc định).
+    Interactive,
+    /// `-c "cmd"` — chạy 1 lệnh rồi exit.
+    Command(String),
+    /// Script file + args truyền vào.
+    Script(String, Vec<String>),
+    Help,
+    Version,
+}
+
+fn parse_cli(args: &[String]) -> CliMode {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-c" => {
+                let Some(cmd) = args.get(i + 1) else {
+                    eprintln!("jaksh: `-c` cần argument: lệnh để chạy");
+                    std::process::exit(2);
+                };
+                return CliMode::Command(cmd.clone());
+            }
+            // Flag tương thích bash/zsh — login / interactive đều no-op vì JakShell
+            // luôn nạp .jakshrc khi mở.
+            "-l" | "--login" | "-i" | "--interactive" => {}
+            "-V" | "--version" => return CliMode::Version,
+            "-h" | "--help" => return CliMode::Help,
+            "--" => {
+                if let Some((path, rest)) = args[i + 1..].split_first() {
+                    return CliMode::Script(path.clone(), rest.to_vec());
+                }
+                return CliMode::Interactive;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("jaksh: tham số không nhận: {other}");
+                eprintln!("Chạy `jaksh --help` để xem help.");
+                std::process::exit(2);
+            }
+            _ => {
+                // Positional: script file + remaining args
+                let path = args[i].clone();
+                let rest: Vec<String> = args[i + 1..].to_vec();
+                return CliMode::Script(path, rest);
+            }
+        }
+        i += 1;
+    }
+    CliMode::Interactive
+}
+
+fn print_cli_help() {
+    println!("JakShell {} — shell nhanh, gọn, thân thiện", env!("JAKSH_VERSION"));
+    println!();
+    println!("USAGE:");
+    println!("  jaksh                          REPL tương tác (mặc định)");
+    println!("  jaksh -c \"<lệnh>\"              chạy 1 lệnh rồi exit");
+    println!("  jaksh <script.sh> [args...]    chạy script từng dòng rồi exit");
+    println!();
+    println!("OPTIONS:");
+    println!("  -c <cmd>           Chạy <cmd> qua lexer/parser rồi exit");
+    println!("  -l, --login        Login shell mode (no-op, chấp nhận cho tương thích)");
+    println!("  -i, --interactive  Ép interactive (mặc định nếu không có -c/script)");
+    println!("  -V, --version      In phiên bản rồi exit");
+    println!("  -h, --help         In help này rồi exit");
+    println!();
+    println!("Khi dùng trong VSCode / task runner / CI, dạng `jaksh -c \"...\"` là cách");
+    println!("chuẩn để chạy 1 lệnh từ tiến trình khác — banner, greeting, timing đều bị");
+    println!("tắt, output sạch.");
+}
+
+/// Chạy 1 dòng lệnh non-interactive: nạp config, parse + execute, exit với mã trả về.
+/// KHÔNG in banner / greeting / timing — output phải sạch cho tool gọi (VSCode, CI, ...).
+fn run_oneshot(line: &str) -> Result<()> {
+    let shell = Rc::new(RefCell::new(Shell::new()?));
+    if let Err(e) = config::load(&shell) {
+        eprintln!("\x1b[33mjaksh: lỗi khi nạp cấu hình: {e}\x1b[0m");
+    }
+    let code = match run_line(&shell, line) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+/// Chạy script file từng dòng. Bỏ qua dòng trống và comment `#`.
+fn run_script(path: &str, _args: &[String]) -> Result<()> {
+    let shell = Rc::new(RefCell::new(Shell::new()?));
+    if let Err(e) = config::load(&shell) {
+        eprintln!("\x1b[33mjaksh: lỗi khi nạp cấu hình: {e}\x1b[0m");
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\x1b[31mjaksh: không đọc được {path}: {e}\x1b[0m");
+            std::process::exit(1);
+        }
+    };
+    let mut last_code = 0;
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match run_line(&shell, raw) {
+            Ok(c) => last_code = c,
+            Err(e) => {
+                eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
+                last_code = 1;
+            }
+        }
+    }
+    std::process::exit(last_code);
 }

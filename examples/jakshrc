@@ -6,5 +6,7 @@
 export PATH=$HOME/.local/bin:$PATH
 
 # Ví dụ alias ngắn ngoài file TOML
+# Lưu ý: alias có giá trị nhiều từ phải dùng nháy kép — nếu không, từ thứ 2
+# sẽ bị xem là arg riêng và alias builtin sẽ in `alias <tên>='...'` ra stdout.
 alias c=clear
-alias ..=cd ..
+alias ..="cd .."
