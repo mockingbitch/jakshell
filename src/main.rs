@@ -10,6 +10,7 @@ mod i18n;
 mod info;
 mod jak;
 mod lexer;
+mod markdown;
 mod parser;
 mod pretty;
 mod prompt;

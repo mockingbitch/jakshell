@@ -901,7 +901,7 @@ fn read_new_version(source: &str) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
 }
 
-/// In phần đầu (section mới nhất) của CHANGELOG.md.
+/// In phần đầu (section mới nhất) của CHANGELOG.md, render markdown thành ANSI.
 fn print_latest_changelog(content: &str) {
     let lines: Vec<&str> = content.lines().collect();
     let mut start: Option<usize> = None;
@@ -920,9 +920,8 @@ fn print_latest_changelog(content: &str) {
     println!();
     println!("\x1b[1m{}\x1b[0m", crate::i18n::t("version.whats_new"));
     println!();
-    for line in &lines[s..end] {
-        println!("{}", line);
-    }
+    let section = lines[s..end].join("\n");
+    crate::markdown::print(&section);
 }
 
 // ─── jak lang ─────────────────────────────────────────────────────────────────
@@ -1052,7 +1051,7 @@ fn version_info(args: &[&str]) -> Result<i32> {
     println!();
     println!("{dim}{}{reset}", "─".repeat(56));
     if show_all {
-        print!("{}", EMBEDDED_CHANGELOG);
+        crate::markdown::print(EMBEDDED_CHANGELOG);
     } else {
         print_latest_changelog(EMBEDDED_CHANGELOG);
         println!();
