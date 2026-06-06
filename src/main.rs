@@ -316,7 +316,7 @@ fn pick_tip() -> &'static str {
         "Đổi giao diện: `jak theme ocean | forest | sunset | mono`.",
         "Xem thông tin máy: `jak sysinfo`. Xem IP: `jak ip`. Thời tiết: `jak weather`.",
         "Gõ sai lệnh? JakShell sẽ gợi ý 'có phải bạn muốn …?'.",
-        "Cấu hình tại `~/.jakshrc.toml` — prompt, theme, alias, env, timing, greeting.",
+        "Quên lệnh? `jak help` liệt kê toàn bộ tiện ích · `explain` liệt kê 70+ lệnh đã có chú thích.",
         "Sau mỗi lệnh có dòng `⏱ X ms` — thời gian thực thi.",
         "Trong git repo: prompt hiện branch, *=dirty, ↑↓=ahead/behind, ⚑=stash.",
         "`jak find big` — tìm 20 file lớn nhất. `jak find recent` — sửa trong 24h qua.",
