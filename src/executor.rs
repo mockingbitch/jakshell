@@ -207,7 +207,7 @@ fn spawn_external(shell: &Rc<RefCell<Shell>>, cmd: &SimpleCommand, background: b
         }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("jaksh: không tìm thấy lệnh: {}", prog);
+                eprintln!("jaksh: {}: {}", crate::i18n::t("common.not_found"), prog);
                 Ok(127)
             } else {
                 eprintln!("jaksh: không chạy được {}: {}", prog, e);
@@ -258,7 +258,7 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("jaksh: không tìm thấy lệnh: {}", prog);
+                    eprintln!("jaksh: {}: {}", crate::i18n::t("common.not_found"), prog);
                 } else {
                     eprintln!("jaksh: không chạy được {}: {}", prog, e);
                 }

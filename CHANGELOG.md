@@ -7,6 +7,38 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.2] — i18n + trải nghiệm gõ lệnh thông minh
+
+### Đã thêm
+
+- **🌐 i18n 6 ngôn ngữ** — `vi / en / kr / jp / cn / th`. Lệnh `jak lang <code>` đổi & lưu vĩnh viễn vào `~/.config/jaksh/language`.
+  - **Toàn bộ 106 entry `explain`** đã được dịch (summary + flags + examples + note) — tổng hơn 5000 chuỗi.
+  - Triết lý: thuật ngữ dev (PID, branch, permissions, …) giữ nguyên tiếng Anh; chỉ prose là dịch.
+- **Inline autosuggest** (fish-style ghost text) — gõ vài ký tự thấy gợi ý mờ ngay sau cursor, nhấn `→` để chấp nhận. Nguồn: history → builtin → alias → `jak`.
+- **Tab completion list-mode** — Tab lần 1 in danh sách candidates + complete common prefix; Tab tiếp theo cycle qua từng option (bash/zsh style).
+- **Icon trong tab completion** — `⚙ builtin · ↪ alias · 🔖 bookmark · ★ jak utility · $ PATH · 📁 dir · 📄 file · ▶ exec` để phân biệt nhanh.
+- **Context-aware path completion** — `cd Ca<Tab>` chỉ folders; lệnh khác vẫn hiện cả files + folders.
+- **Hint khi lệnh fail** — sau exit != 0 in giải thích mã (`126 = thiếu quyền x`, `137 = SIGKILL OOM`, `139 = segfault`, …) + gợi ý `--help` hoặc `chmod +x`. Skip cho lệnh non-zero-by-design (grep/test/diff/false/…).
+- **`ls` tự tô màu mặc định** — set `CLICOLOR/LSCOLORS/LS_COLORS` env + alias `ls -Gp` (macOS) / `ls --color=auto -p` (Linux). Thư mục bold blue + `/` cuối, file mặc định, executable green, symlink cyan.
+
+### Đã sửa
+
+- Bug normalize tên explain với ký tự `/` (vd `docker stop / start / restart`) khiến i18n key không khớp → toàn bộ rơi về tiếng Việt. Đã fix: `normalize_name()` mới thay mọi ký tự không phải alphanumeric/'-' bằng `_`.
+- Bug i18n thiếu `summary` cho 35 lệnh (uptime, who, git subs, docker subs, …) — đã bổ sung.
+
+### Cấu hình mới
+
+```toml
+[timing]
+show_hint = true        # in hint sau lệnh fail (default true)
+```
+
+```bash
+~/.config/jaksh/language    # lưu mã ngôn ngữ đã chọn (vi/en/kr/jp/cn/th)
+```
+
+---
+
 ## [v1.0.1] — Tự cập nhật & thông tin version
 
 ### Đã thêm
@@ -216,5 +248,6 @@ jak theme list          # chọn giao diện
 
 ---
 
+[v1.0.2]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.2
 [v1.0.1]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.1
 [v1.0.0]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.0

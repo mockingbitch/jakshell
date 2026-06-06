@@ -59,28 +59,29 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
         (_, Some(kind)) => {
             // Có live annotator → luôn chạy + annotate
             println!();
-            println!("\x1b[2m── output ──────────────────────────\x1b[0m");
+            println!("\x1b[2m{}\x1b[0m", crate::i18n::t("explain.output"));
             run_live(shell, cmd, &args[1..], kind)
         }
         (Some(e), None) if !e.skip_run => {
             // Lệnh an toàn không có annotator → chạy bình thường
             println!();
-            println!("\x1b[2m── output ──────────────────────────\x1b[0m");
+            println!("\x1b[2m{}\x1b[0m", crate::i18n::t("explain.output"));
             run_simple(shell, cmd, &args[1..])
         }
         (Some(e), None) if e.skip_run => {
             // Lệnh destructive / interactive → KHÔNG chạy
             println!();
             println!(
-                "\x1b[2m(không tự chạy `{}` vì có thể thay đổi/yêu cầu tương tác. Gõ trực tiếp nếu muốn.)\x1b[0m",
-                e.name
+                "\x1b[2m(`{}` — {})\x1b[0m",
+                e.name,
+                crate::i18n::t("explain.skip_run")
             );
             Ok(0)
         }
         (None, _) => {
             // Không có chú thích — vẫn chạy nguyên si để không cản người dùng
             println!();
-            println!("\x1b[2m── output ──────────────────────────\x1b[0m");
+            println!("\x1b[2m{}\x1b[0m", crate::i18n::t("explain.output"));
             run_simple(shell, cmd, &args[1..])
         }
         _ => Ok(0),
@@ -249,38 +250,62 @@ fn lookup_live_kind(cmd: &str, rest: &[&str]) -> Option<LiveKind> {
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
+fn normalize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect()
+}
+
 fn print_explanation(e: &Explanation) {
+    // Tra summary đã dịch nếu có (key: "explain.<name>.summary").
+    // Normalize tên: thay mọi ký tự không phải alphanumeric/'-' bằng '_'.
+    // Nhờ vậy "docker stop / start / ..." → "docker_stop___start___..."
+    let key = format!("explain.{}.summary", normalize_name(e.name));
+    let translated = crate::i18n::t(&key);
+    let summary = if translated.is_empty() { e.summary } else { translated };
+
     println!(
         "\x1b[1m{}\x1b[0m \x1b[2m— {}\x1b[0m",
-        e.name, e.summary
+        e.name, summary
     );
     println!();
-    println!("\x1b[36mCú pháp:\x1b[0m  \x1b[33m{}\x1b[0m", e.usage);
+    println!("\x1b[36m{}\x1b[0m  \x1b[33m{}\x1b[0m", crate::i18n::t("explain.syntax"), e.usage);
+
+    let safe_name = normalize_name(e.name);
 
     if !e.flags.is_empty() {
         println!();
-        println!("\x1b[36mTham số / cờ:\x1b[0m");
+        println!("\x1b[36m{}\x1b[0m", crate::i18n::t("explain.flags"));
         let w = e.flags.iter().map(|(f, _)| f.len()).max().unwrap_or(0).min(20);
-        for (f, d) in e.flags {
-            println!("  \x1b[33m{:<w$}\x1b[0m  {}", f, d, w = w);
+        for (i, (f, d)) in e.flags.iter().enumerate() {
+            let key = format!("explain.{}.flag.{}", safe_name, i);
+            let tr = crate::i18n::t(&key);
+            let desc = if tr.is_empty() { *d } else { tr };
+            println!("  \x1b[33m{:<w$}\x1b[0m  {}", f, desc, w = w);
         }
     }
 
     if !e.examples.is_empty() {
         println!();
-        println!("\x1b[36mVí dụ:\x1b[0m");
-        for (cmd, what) in e.examples {
+        println!("\x1b[36m{}\x1b[0m", crate::i18n::t("explain.examples"));
+        for (i, (cmd, what)) in e.examples.iter().enumerate() {
             println!("  \x1b[2m$\x1b[0m \x1b[1m{}\x1b[0m", cmd);
-            if !what.is_empty() {
-                println!("    \x1b[2m{}\x1b[0m", what);
+            let key = format!("explain.{}.example.{}", safe_name, i);
+            let tr = crate::i18n::t(&key);
+            let desc = if tr.is_empty() { *what } else { tr };
+            if !desc.is_empty() {
+                println!("    \x1b[2m{}\x1b[0m", desc);
             }
         }
     }
 
-    if !e.note.is_empty() {
+    let note_key = format!("explain.{}.note", safe_name);
+    let translated_note = crate::i18n::t(&note_key);
+    let note = if translated_note.is_empty() { e.note } else { translated_note };
+    if !note.is_empty() {
         println!();
-        println!("\x1b[36mGhi chú:\x1b[0m");
-        for line in e.note.lines() {
+        println!("\x1b[36m{}\x1b[0m", crate::i18n::t("explain.notes"));
+        for line in note.lines() {
             println!("  {}", line);
         }
     }
@@ -333,7 +358,7 @@ fn run_live(
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     if !stdout_text.trim().is_empty() {
         println!();
-        println!("\x1b[2m── chú thích giá trị thực ──────────\x1b[0m");
+        println!("\x1b[2m{}\x1b[0m", crate::i18n::t("explain.live_annotation"));
         match kind {
             LiveKind::LsLong => annotate_ls_long(&stdout_text),
             LiveKind::Ps => annotate_ps(&stdout_text),
@@ -350,38 +375,39 @@ fn run_live(
 
 fn list_all() {
     crate::info::print_banner();
-    println!("\x1b[1mexplain — các lệnh đã có chú thích\x1b[0m\n");
+    let t = crate::i18n::t;
+    println!("\x1b[1m{}\x1b[0m\n", t("explain.list_title"));
     let groups: &[(&str, &[&str])] = &[
-        ("Điều hướng & thông tin",
+        (t("explain.group.nav"),
             &["cd", "pwd", "ls", "find"]),
-        ("Quản lý file",
+        (t("explain.group.file_mgmt"),
             &["cp", "mv", "rm", "mkdir", "rmdir", "touch", "ln", "chmod", "chown"]),
-        ("Xem nội dung",
+        (t("explain.group.view"),
             &["cat", "less", "head", "tail", "echo"]),
-        ("Tìm kiếm & lọc",
+        (t("explain.group.filter"),
             &["grep", "sort", "uniq", "wc", "cut", "tr", "xargs"]),
-        ("Process",
+        (t("explain.group.process"),
             &["ps", "top", "kill", "pkill", "killall"]),
-        ("Đĩa & filesystem",
+        (t("explain.group.disk"),
             &["df", "du", "free", "stat", "lsof"]),
-        ("Mạng",
+        (t("explain.group.network"),
             &["ssh", "ssh-keygen", "ssh-copy-id", "ssh-add", "sftp", "scp",
               "curl", "wget", "ping", "netstat", "ss", "ifconfig", "ip"]),
-        ("Docker",
+        (t("explain.group.docker"),
             &["docker", "docker ps", "docker exec", "docker run", "docker build",
               "docker images", "docker pull", "docker push", "docker logs",
               "docker stop/start/restart/kill", "docker rm", "docker rmi",
               "docker inspect", "docker network", "docker volume", "docker compose",
               "docker cp", "docker login", "docker system", "docker tag"]),
-        ("Nén / Giải nén",
+        (t("explain.group.archive"),
             &["tar", "zip", "unzip"]),
-        ("Hệ thống & shell",
+        (t("explain.group.system"),
             &["uptime", "who", "date", "env", "alias", "history", "which", "man"]),
-        ("Git — cơ bản",
+        (t("explain.group.git_basic"),
             &["git", "git status", "git log", "git diff", "git branch", "git config"]),
-        ("Git — file/commit",
+        (t("explain.group.git_file"),
             &["git add", "git commit", "git restore", "git reset", "git revert", "git stash", "git show", "git blame", "git reflog"]),
-        ("Git — branch & remote",
+        (t("explain.group.git_remote"),
             &["git clone", "git init", "git checkout", "git switch", "git merge", "git rebase", "git cherry-pick", "git tag", "git remote", "git fetch", "git pull", "git push"]),
     ];
     for (group, cmds) in groups {
@@ -390,8 +416,8 @@ fn list_all() {
         println!("  {}", line);
         println!();
     }
-    println!("Dùng: \x1b[36mexplain <lệnh> [tham số]\x1b[0m");
-    println!("Live annotation (chú thích giá trị thật): \x1b[36mls -l, ps, df, du, free\x1b[0m");
+    println!("{} \x1b[36mexplain <cmd> [args]\x1b[0m", t("explain.use_hint"));
+    println!("{} \x1b[36mls -l, ps, df, du, free\x1b[0m", t("explain.live_label"));
 }
 
 // ─── Live annotators ──────────────────────────────────────────────────────────

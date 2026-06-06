@@ -74,6 +74,7 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
         "git" => git_shortcut(shell, &rest),
         "self-update" | "upgrade" | "selfupdate" => self_update(shell),
         "version" | "--version" | "-v" | "changelog" | "whatsnew" => version_info(&rest),
+        "lang" | "language" | "locale" => lang_cmd(&rest),
         _ => {
             // Thử bookmark
             if crate::bookmark::lookup(sub).is_some() {
@@ -90,20 +91,22 @@ pub fn run(shell: &Rc<RefCell<Shell>>, args: &[String]) -> Result<i32> {
 
 fn help() -> Result<i32> {
     crate::info::print_banner();
-    println!("\x1b[1mjak\x1b[0m \x1b[2m— bộ lệnh tiện ích\x1b[0m\n");
-    let items = [
-        ("clean", "Xoá file tạm và cache trong ~/.cache, /tmp do bạn sở hữu"),
-        ("backup <thư_mục>", "Nén thư mục thành .tar.gz với tên-ngày-giờ"),
-        ("update", "Tự dò brew/apt/dnf/pacman và chạy update + upgrade"),
-        ("find <tên>", "Tìm file/thư mục (gõ `jak find help` để xem chế độ nâng cao: file/dir/text/big/recent/empty)"),
-        ("open <app|path|url>", "Mở app (chrome/vscode/slack/zalo…), file, hay URL. Gõ `jak open list`."),
-        ("sysinfo", "In thông tin máy: OS, CPU, RAM, đĩa"),
-        ("theme <tên>", "Đổi giao diện (lưu lựa chọn) — gõ `jak theme list` để xem 17 theme"),
-        ("ip", "In địa chỉ IP nội bộ và public"),
-        ("weather [thành phố]", "Xem thời tiết (qua wttr.in)"),
-        ("git <save|sync|undo|wip|...>", "Workflow git: gõ `jak git` để xem chi tiết"),
-        ("self-update", "Cập nhật JakShell: git pull + ./install.sh tự động"),
-        ("version [all]", "Thông tin phiên bản + CHANGELOG (thêm `all` để xem toàn bộ)"),
+    let t = crate::i18n::t;
+    println!("\x1b[1mjak\x1b[0m \x1b[2m— {}\x1b[0m\n", t("jak.title"));
+    let items: &[(&str, &str)] = &[
+        ("clean",                       t("jak.desc.clean")),
+        ("backup <dir>",                t("jak.desc.backup")),
+        ("update",                      t("jak.desc.update")),
+        ("find <name>",                 t("jak.desc.find")),
+        ("open <app|path|url>",         t("jak.desc.open")),
+        ("sysinfo",                     t("jak.desc.sysinfo")),
+        ("theme <name>",                t("jak.desc.theme")),
+        ("ip",                          t("jak.desc.ip")),
+        ("weather [city]",              t("jak.desc.weather")),
+        ("git <save|sync|undo|wip|...>", t("jak.desc.git")),
+        ("self-update",                 t("jak.desc.self_update")),
+        ("version [all]",               t("jak.desc.version")),
+        ("lang <code>",                 t("jak.desc.lang")),
     ];
     for (cmd, desc) in items {
         println!("  \x1b[36m{:32}\x1b[0m {}", cmd, desc);
@@ -112,7 +115,11 @@ fn help() -> Result<i32> {
     let bookmarks = crate::bookmark::list_all();
     if !bookmarks.is_empty() {
         println!();
-        println!("\x1b[1m▸ Bookmark ({}):\x1b[0m", bookmarks.len());
+        println!(
+            "\x1b[1m▸ {} ({}):\x1b[0m",
+            crate::i18n::t("jak.bookmarks_label"),
+            bookmarks.len()
+        );
         let w = bookmarks
             .iter()
             .map(|(n, _)| format!("jak {}", n).len())
@@ -121,7 +128,6 @@ fn help() -> Result<i32> {
             .min(32);
         for (name, cmd) in &bookmarks {
             let label = format!("jak {}", name);
-            // Cắt ngắn cmd hiển thị để không tràn dòng
             let preview: String = cmd.chars().take(60).collect();
             let suffix = if cmd.len() > 60 { "…" } else { "" };
             println!(
@@ -129,13 +135,12 @@ fn help() -> Result<i32> {
                 label, preview, suffix, w = w
             );
         }
-        println!(
-            "\n\x1b[2mQuản lý: `bookmark`, `bookmark <name> <cmd ...>`, `bookmark del <name>`\x1b[0m"
-        );
+        println!("\n\x1b[2m{}\x1b[0m", crate::i18n::t("jak.bookmark_manage"));
     } else {
         println!();
         println!(
-            "\x1b[2m▸ Bookmark: chưa có. Tạo bằng: \x1b[36mbookmark <name> <command ...>\x1b[0m"
+            "\x1b[2m▸ {} \x1b[36mbookmark <name> <command ...>\x1b[0m",
+            crate::i18n::t("jak.no_bookmarks")
         );
     }
 
@@ -913,11 +918,96 @@ fn print_latest_changelog(content: &str) {
     }
     let Some(s) = start else { return };
     println!();
-    println!("\x1b[1m📝 Có gì mới trong bản này:\x1b[0m");
+    println!("\x1b[1m{}\x1b[0m", crate::i18n::t("version.whats_new"));
     println!();
     for line in &lines[s..end] {
         println!("{}", line);
     }
+}
+
+// ─── jak lang ─────────────────────────────────────────────────────────────────
+
+fn lang_cmd(args: &[&str]) -> Result<i32> {
+    use crate::i18n::{self, Lang};
+    let sub = args.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "current" => {
+            print_lang_status();
+            Ok(0)
+        }
+        "list" | "ls" => {
+            print_lang_status();
+            println!();
+            println!("\x1b[2m{}\x1b[0m", i18n::t("lang.dev_note"));
+            Ok(0)
+        }
+        "reset" | "default" | "clear" => {
+            let _ = i18n::delete_saved();
+            i18n::set(Lang::Vi);
+            println!("\x1b[32m✓\x1b[0m {}", i18n::t("lang.reset_ok"));
+            Ok(0)
+        }
+        "help" | "?" | "--help" | "-h" => {
+            print_lang_status();
+            println!();
+            println!("\x1b[2m{}\x1b[0m", i18n::t("lang.dev_note"));
+            Ok(0)
+        }
+        code => {
+            match Lang::from_code(code) {
+                Some(l) => {
+                    i18n::set(l);
+                    if let Err(e) = i18n::save_to_disk(l) {
+                        eprintln!("\x1b[33m⚠ không lưu được lựa chọn: {}\x1b[0m", e);
+                    }
+                    println!(
+                        "\x1b[32m✓\x1b[0m {} \x1b[1m{} {}\x1b[0m  \x1b[2m({}){}\x1b[0m",
+                        i18n::t("lang.set_ok"),
+                        l.flag(),
+                        l.native(),
+                        l.code(),
+                        "",
+                    );
+                    println!("\n\x1b[2m{}\x1b[0m", i18n::t("lang.dev_note"));
+                    Ok(0)
+                }
+                None => {
+                    eprintln!("\x1b[33m{} '{}'\x1b[0m", i18n::t("lang.unknown"), code);
+                    eprintln!("\x1b[2m{}\x1b[0m", i18n::t("lang.see_list"));
+                    Ok(1)
+                }
+            }
+        }
+    }
+}
+
+fn print_lang_status() {
+    use crate::i18n::{self, ALL};
+    let cur = i18n::current();
+    println!("\x1b[1m{}\x1b[0m\n", i18n::t("lang.title"));
+    println!(
+        "  \x1b[2m{}\x1b[0m  \x1b[1m{} {}\x1b[0m  \x1b[2m({})\x1b[0m",
+        i18n::t("lang.current"),
+        cur.flag(),
+        cur.native(),
+        cur.code()
+    );
+    println!();
+    println!("  \x1b[2m{}\x1b[0m", i18n::t("lang.supported"));
+    for l in ALL {
+        let marker = if *l == cur { "●" } else { " " };
+        println!(
+            "    \x1b[32m{}\x1b[0m  {}  \x1b[1m{:<10}\x1b[0m  \x1b[2m{}\x1b[0m",
+            marker,
+            l.flag(),
+            l.code(),
+            l.native()
+        );
+    }
+    println!();
+    println!(
+        "  \x1b[2mĐổi:\x1b[0m \x1b[36mjak lang <code>\x1b[0m  \x1b[2m·  Reset:\x1b[0m \x1b[36mjak lang reset\x1b[0m"
+    );
 }
 
 // ─── jak version / jak changelog ──────────────────────────────────────────────
@@ -940,21 +1030,21 @@ fn version_info(args: &[&str]) -> Result<i32> {
         ver = env!("JAKSH_VERSION")
     );
     println!();
-    println!("  {dim}Commit:{reset}      {}", env!("JAKSH_COMMIT_HASH"));
-    println!("  {dim}Commit date:{reset} {}", env!("JAKSH_COMMIT_DATE"));
-    println!("  {dim}Built:{reset}       {}", env!("JAKSH_BUILD_DATE"));
-    println!("  {dim}Rust:{reset}        {}", env!("JAKSH_RUSTC"));
+    let t = crate::i18n::t;
+    println!("  {dim}{:<13}{reset}  {}", t("version.commit"),      env!("JAKSH_COMMIT_HASH"));
+    println!("  {dim}{:<13}{reset}  {}", t("version.commit_date"), env!("JAKSH_COMMIT_DATE"));
+    println!("  {dim}{:<13}{reset}  {}", t("version.built"),       env!("JAKSH_BUILD_DATE"));
+    println!("  {dim}{:<13}{reset}  {}", t("version.rust"),        env!("JAKSH_RUSTC"));
     println!(
-        "  {dim}Target:{reset}      {}-{}",
-        std::env::consts::ARCH,
-        std::env::consts::OS
+        "  {dim}{:<13}{reset}  {}-{}",
+        t("version.target"), std::env::consts::ARCH, std::env::consts::OS
     );
     println!();
-    println!("  {dim}Author:{reset}      {bold}Jarvis Phong Tran{reset}");
-    println!("  {dim}Repo:{reset}        https://github.com/mockingbitch/jakshell");
+    println!("  {dim}{:<13}{reset}  {bold}Jarvis Phong Tran{reset}", t("version.author"));
+    println!("  {dim}{:<13}{reset}  https://github.com/mockingbitch/jakshell", t("version.repo"));
     println!(
-        "  {dim}Update:{reset}      {y}jak self-update{reset}",
-        y = yellow
+        "  {dim}{:<13}{reset}  {y}jak self-update{reset}",
+        t("version.update"), y = yellow
     );
 
     // ─── Khối CHANGELOG ───
@@ -966,7 +1056,7 @@ fn version_info(args: &[&str]) -> Result<i32> {
     } else {
         print_latest_changelog(EMBEDDED_CHANGELOG);
         println!();
-        println!("{dim}(gõ `jak version all` để xem toàn bộ CHANGELOG){reset}");
+        println!("{dim}{}{reset}", crate::i18n::t("version.view_full"));
     }
     Ok(0)
 }

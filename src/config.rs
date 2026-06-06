@@ -58,6 +58,9 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
             shell.borrow_mut().theme = t;
         }
     }
+
+    // Ngôn ngữ đã chọn qua `jak lang <code>`.
+    crate::i18n::load_from_disk();
     Ok(())
 }
 

@@ -11,19 +11,21 @@ pub fn print_banner() {
     let bar = "┃";
 
     println!(
-        "{cyan}{bar}{reset} {bold}{bc}JakShell{reset} {dim}{ver}{reset}  {dim}—{reset}  Shell Rust cho macOS & Linux",
+        "{cyan}{bar}{reset} {bold}{bc}JakShell{reset} {dim}{ver}{reset}  {dim}—{reset}  {tagline}",
         bc = bright_cyan,
-        ver = env!("JAKSH_VERSION")
+        ver = env!("JAKSH_VERSION"),
+        tagline = crate::i18n::t("banner.tagline"),
     );
     println!(
-        "{cyan}{bar}{reset} Nhanh, gọn, thân thiện cho người Việt — {y}lowtech-friendly{reset}",
-        y = yellow
+        "{cyan}{bar}{reset} {tagline2}",
+        tagline2 = crate::i18n::t("banner.tagline2").replace("lowtech-friendly", &format!("{}lowtech-friendly{}", yellow, reset)),
     );
     println!(
         "{cyan}{bar}{reset} {bold}explain{reset}  ·  {bold}--jak{reset}  ·  {bold}bookmark{reset}  ·  {bold}jak utils{reset}  ·  {bold}smart git prompt{reset}",
     );
     println!(
-        "{cyan}{bar}{reset} {dim}Developed by{reset} {bold}Jarvis Phong Tran{reset}  {dim}·  https://github.com/mockingbitch/jakshell{reset}",
+        "{cyan}{bar}{reset} {dim}{dev}{reset} {bold}Jarvis Phong Tran{reset}  {dim}·  https://github.com/mockingbitch/jakshell{reset}",
+        dev = crate::i18n::t("banner.developed_by"),
     );
     println!();
 }

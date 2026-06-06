@@ -22,6 +22,8 @@ enabled = true
 threshold_ms = 0
 # Khi exit code != 0, có in thêm "✗ exit N" không.
 show_status = true
+# Khi lệnh fail, in gợi ý giải thích mã exit (126/2/130/137/…)
+show_hint = true
 
 [greeting]
 # Bật toàn bộ banner khi mở shell

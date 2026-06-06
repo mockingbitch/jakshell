@@ -50,6 +50,8 @@ pub struct TimingConfig {
     pub threshold_ms: u64,
     /// Nếu true: kèm exit code khi khác 0.
     pub show_status: bool,
+    /// Nếu true: kèm gợi ý lý do khi lệnh fail (exit != 0).
+    pub show_hint: bool,
 }
 
 impl Default for TimingConfig {
@@ -58,6 +60,7 @@ impl Default for TimingConfig {
             enabled: true,
             threshold_ms: 0,
             show_status: true,
+            show_hint: true,
         }
     }
 }
@@ -79,6 +82,9 @@ pub enum JobState {
 
 impl Shell {
     pub fn new() -> Result<Self> {
+        // Bật màu mặc định cho `ls`: env var + (lát nữa) alias mặc định.
+        setup_ls_colors();
+
         let env: HashMap<String, String> = std::env::vars().collect();
         let cwd = std::env::current_dir()?;
         let config_dir = dirs::home_dir()
@@ -88,7 +94,7 @@ impl Shell {
 
         Ok(Self {
             env,
-            aliases: HashMap::new(),
+            aliases: default_aliases(),
             cwd,
             theme: Theme::default(),
             jobs: Vec::new(),
@@ -181,6 +187,44 @@ impl Shell {
         }
         self.jobs.retain(|j| j.state != JobState::Done);
     }
+}
+
+/// Đặt env var để hệ thống `ls` tự tô màu. Chỉ set nếu user CHƯA đặt.
+fn setup_ls_colors() {
+    let set_if_unset = |k: &str, v: &str| {
+        if std::env::var_os(k).is_none() {
+            std::env::set_var(k, v);
+        }
+    };
+    // BSD ls (macOS): CLICOLOR=1 bật màu, LSCOLORS định nghĩa palette.
+    // 11 cặp ký tự (fg+bg): dir/sym/socket/pipe/exec/block/char/setuid/setgid/sticky-other-write/other-write
+    // Ex = exec (bold) blue, Fx = bold magenta, ...
+    set_if_unset("CLICOLOR", "1");
+    set_if_unset("LSCOLORS", "ExFxBxDxCxegedabagacad");
+
+    // GNU ls (Linux): LS_COLORS định nghĩa palette.
+    // di=directory, ln=symlink, so=socket, pi=pipe, ex=executable, ...
+    set_if_unset(
+        "LS_COLORS",
+        "di=1;34:ln=1;36:so=1;35:pi=1;33:ex=1;32:bd=33;1:cd=33;1:su=1;31:sg=1;31:tw=1;34:ow=1;34",
+    );
+}
+
+/// Bí danh mặc định để `ls` tô màu + thêm `/` sau tên thư mục.
+/// User có thể override qua `[aliases]` trong ~/.jakshrc.toml.
+fn default_aliases() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    // `-p` = thêm `/` cuối tên thư mục (BSD + GNU).
+    // macOS BSD: `-G` bật màu. GNU Linux: `--color=auto`.
+    #[cfg(target_os = "macos")]
+    {
+        m.insert("ls".into(), "ls -Gp".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        m.insert("ls".into(), "ls --color=auto -p".into());
+    }
+    m
 }
 
 fn default_prompt_template() -> String {

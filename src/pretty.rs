@@ -120,19 +120,19 @@ fn pretty_ls(out: &str, args: &[&str], color: bool) {
         return;
     }
 
-    // Tính độ rộng các cột (perms, links, owner, group, size, date, name)
+    // Tính độ rộng cột — phải bao gồm cả độ dài header text để không bị tràn.
+    let headers = ["perms", "links", "owner", "group", "size", "date", "name"];
     let mut w = [0usize; 7];
+    for (i, h) in headers.iter().enumerate() {
+        w[i] = h.len();
+    }
     for r in &rows {
-        w[0] = w[0].max(r[0].len()); // perms
-        w[1] = w[1].max(r[1].len()); // links
-        w[2] = w[2].max(r[2].len()); // owner
-        w[3] = w[3].max(r[3].len()); // group
-        w[4] = w[4].max(r[4].len()); // size
-        w[5] = w[5].max(r[5].len()); // date
-        w[6] = w[6].max(r[6].len()); // name
+        for i in 0..7 {
+            w[i] = w[i].max(r[i].len());
+        }
     }
 
-    // Header gợi nhớ
+    // Header gợi nhớ — căn giống data row (perms/owner/group/date/name left, links/size right)
     let arrow = if color { "\x1b[2m→\x1b[0m" } else { "→" };
     println!(
         "{arrow} {bold}{:<wp$}  {:>wl$}  {:<wo$}  {:<wg$}  {:>ws$}  {:<wd$}  {:<wn$}{reset}",
@@ -155,19 +155,20 @@ fn pretty_ls(out: &str, args: &[&str], color: bool) {
         let perms_colored = colorize_perms(perms, color);
         let size_colored = colorize_size(size, color);
 
-        // perms cần độ rộng theo TEXT (không tính ANSI). Pad bằng spaces sau khi tô.
+        // perms/size có ANSI → pad bằng spaces theo độ rộng "visible".
+        // perms: left-align (pad bên phải). size: right-align (pad bên trái).
         let pad_perms = " ".repeat(w[0].saturating_sub(visible_len(perms)));
         let pad_size = " ".repeat(w[4].saturating_sub(visible_len(size)));
 
         println!(
-            "  {perms}{pp}  {links:>wl$}  {owner:<wo$}  {group:<wg$}  {size}{ps}  {date:<wd$}  {name}{decor}",
+            "  {perms}{pp}  {links:>wl$}  {owner:<wo$}  {group:<wg$}  {ps}{size}  {date:<wd$}  {name}{decor}",
             perms = perms_colored,
             pp = pad_perms,
             links = links,
             owner = owner,
             group = group,
-            size = size_colored,
             ps = pad_size,
+            size = size_colored,
             date = date,
             name = name_colored,
             decor = name_decor,

@@ -167,7 +167,7 @@ fn pwd(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
 
 fn exit(args: &[&str]) -> Result<i32> {
     let code = args.first().and_then(|a| a.parse::<i32>().ok()).unwrap_or(0);
-    println!("tạm biệt 👋");
+    println!("{} 👋", crate::i18n::t("common.goodbye"));
     std::process::exit(code);
 }
 
@@ -350,9 +350,9 @@ fn kill(args: &[&str]) -> Result<i32> {
 
 fn help() -> Result<i32> {
     crate::info::print_banner();
-    println!("\x1b[1mTrợ giúp nhanh\x1b[0m");
+    println!("\x1b[1m{}\x1b[0m", crate::i18n::t("help.title"));
     println!();
-    println!("\x1b[36m▸ Tiện ích JakShell (gõ `jak help` để xem chi tiết):\x1b[0m");
+    println!("\x1b[36m▸ {}\x1b[0m", crate::i18n::t("help.utilities"));
     println!("  jak clean             dọn cache & file tạm");
     println!("  jak backup <thư_mục>  nén & đặt tên theo ngày");
     println!("  jak update            cập nhật hệ thống (brew/apt/dnf)");
@@ -365,17 +365,17 @@ fn help() -> Result<i32> {
     println!("  jak git <sub>         workflow git (save/sync/wip/amend/...)");
     println!("  jak <bookmark>        chạy lệnh đã bookmark (xem `bookmark`)");
     println!();
-    println!("\x1b[36m▸ bookmark — đặt tên cho lệnh dài:\x1b[0m");
+    println!("\x1b[36m▸ {}\x1b[0m", crate::i18n::t("help.bookmark_section"));
     println!("  bookmark <name> <cmd ...>   tạo / cập nhật");
     println!("  bookmark                    liệt kê");
     println!("  bookmark del <name>         xoá");
     println!();
-    println!("\x1b[36m▸ explain — chú thích lệnh:\x1b[0m");
+    println!("\x1b[36m▸ {}\x1b[0m", crate::i18n::t("help.explain_section"));
     println!("  explain                liệt kê các lệnh đã có chú thích");
     println!("  explain <lệnh>         xem usage / tham số / ví dụ");
     println!("  explain ls -la         live annotate giá trị thật trên output");
     println!();
-    println!("\x1b[36m▸ --jak — tô màu & format lại output:\x1b[0m");
+    println!("\x1b[36m▸ {}\x1b[0m", crate::i18n::t("help.jak_color_section"));
     println!("  ls -la --jak           tô màu permissions, icon thư mục/exec");
     println!("  ps aux --jak           PID, %CPU, %MEM tô theo ngưỡng");
     println!("  df -h --jak            Use% xanh→vàng→đỏ; size theo đơn vị");
@@ -383,7 +383,7 @@ fn help() -> Result<i32> {
     println!("  git status --jak       bố cục theo section + icon");
     println!("  git branch --jak       ● cho branch hiện tại");
     println!();
-    println!("\x1b[2mCấu hình tại ~/.jakshrc.toml và ~/.jakshrc\x1b[0m");
+    println!("\x1b[2m{}\x1b[0m", crate::i18n::t("help.config_at"));
     Ok(0)
 }
 

@@ -30,7 +30,10 @@ Gõ ? hoặc help bất cứ lúc nào.
   - [`bookmark` — đặt tên cho lệnh dài](#bookmark--đặt-tên-cho-lệnh-dài)
 - [Prompt thông minh](#prompt-thông-minh)
 - [Đo thời gian thực thi](#đo-thời-gian-thực-thi)
-- [Did-you-mean](#did-you-mean)
+- [Did-you-mean & failure hints](#did-you-mean--failure-hints)
+- [Tab completion & inline suggestions](#tab-completion--inline-suggestions)
+- [Ngôn ngữ](#ngôn-ngữ)
+- [`ls` tự tô màu](#ls-tự-tô-màu)
 - [Cấu hình](#cấu-hình)
 - [File & thư mục](#file--thư-mục)
 - [Đặt làm shell mặc định](#đặt-làm-shell-mặc-định)
@@ -53,7 +56,11 @@ Gõ ? hoặc help bất cứ lúc nào.
 - **Did-you-mean**: gõ sai lệnh → gợi ý lệnh đúng (jaro-winkler).
 - **Banner chào hỏi theo giờ**: 🌅 sáng / ☀️ trưa / 🌤 chiều / 🌆 tối / 🌙 đêm khuya + 1 mẹo ngẫu nhiên.
 - **17 theme dựng sẵn**: `ocean`, `forest`, `sunset`, `mono`, `dracula`, `nord`, `monokai`, `solarized`, `gruvbox`, `tokyo-night`, `catppuccin`, `rose-pine`, `cyberpunk`, `retro`, `paper`, `light`, `default`. `jak theme <tên>` lưu lựa chọn vĩnh viễn.
-- **Tab completion** cho lệnh, alias, builtin, tiểu lệnh `jak …` / `bookmark` / `explain …`, đường dẫn và PATH binary.
+- **🌐 6 ngôn ngữ**: `vi / en / kr / jp / cn / th` — `jak lang <code>` đổi & lưu. Toàn bộ 106 entry `explain` được dịch (thuật ngữ dev giữ nguyên).
+- **Inline autosuggest** (fish-style): gợi ý mờ khi gõ, nhấn `→` để chấp nhận.
+- **Tab completion list-mode** với icon: `⚙ builtin · ↪ alias · 🔖 bookmark · ★ jak · 📁 dir · 📄 file · ▶ exec`. `cd <Tab>` chỉ folders.
+- **Hint sau lệnh fail**: in giải thích mã exit (`126 = thiếu quyền x`, `137 = SIGKILL OOM`, …) + gợi ý `--help` hoặc `chmod +x`.
+- **`ls` tự tô màu**: env vars `CLICOLOR/LS_COLORS` + alias mặc định — folder bold blue + `/` cuối, exec green, symlink cyan.
 - **`jak version`** — info chi tiết về binary (commit, build date, rustc) + CHANGELOG nhúng sẵn. **`jak self-update`** — pull + cài lại trong 1 lệnh.
 - **Cấu hình TOML**: `~/.jakshrc.toml` cho theme / prompt / alias / env / timing / greeting; `~/.jakshrc` script khởi động.
 
@@ -395,9 +402,9 @@ show_status = true        # in "✗ exit N" đỏ khi exit code != 0
 
 ---
 
-## Did-you-mean
+## Did-you-mean & failure hints
 
-Gõ sai lệnh → JakShell gợi ý:
+**Did-you-mean** — gõ sai → gợi ý lệnh đúng (jaro-winkler ngưỡng 0.86; bỏ qua namespace nội bộ `jak` / `explain`):
 
 ```
 $ gitt status
@@ -405,7 +412,100 @@ jaksh: không tìm thấy lệnh: gitt
 💡 có phải bạn muốn: git?
 ```
 
-Dùng thuật toán jaro-winkler, ngưỡng 0.86. Bỏ qua các namespace nội bộ (`jak`, `explain`) để không gợi ý nhảm.
+**Failure hints** — sau mỗi lệnh exit ≠ 0, in giải thích mã + gợi ý sửa:
+
+```
+$ ./noexec.sh
+jaksh: Permission denied
+⏱  1 ms  ✗ exit 126
+💡 Mã 126: file tồn tại nhưng KHÔNG execute được (thiếu quyền x).
+   Sửa: chmod +x <file>
+
+$ ls --bogus
+⏱  4 ms  ✗ exit 1
+💡 Mã 1: lỗi chung — xem stderr ở trên để biết chi tiết.
+   Thử: ls --help  hoặc  man ls
+```
+
+Bảng mã có giải thích: `1 / 2 / 126 / 128 / 130 / 137 / 139 / 143` + signal kill 129–191. Skip cho lệnh non-zero-by-design: `grep / test / diff / false / cmp / ...`.
+
+Tắt bằng `[timing] show_hint = false` trong `~/.jakshrc.toml`.
+
+---
+
+## Tab completion & inline suggestions
+
+**Inline autosuggest** (fish-style): khi gõ, JakShell hiện ghost text mờ ngay sau cursor. Nhấn `→ (Right Arrow)` để chấp nhận. Nguồn (theo thứ tự ưu tiên):
+
+1. History — lệnh gần đây nhất khớp prefix
+2. Builtin (`cd`, `alias`, `explain`, `bookmark`, …)
+3. Alias đã đặt
+4. Prefix `jak`
+
+**Tab completion list-mode**:
+
+| Lần | Hành vi |
+|-----|---------|
+| Tab 1 | In danh sách candidates + extend đến common prefix |
+| Tab 2+ | Cycle qua từng option |
+
+**Icon phân loại trong list**:
+
+| Icon | Loại |
+|------|------|
+| `⚙` | Builtin |
+| `↪` | Alias (kèm preview lệnh thật) |
+| `🔖` | Bookmark (kèm preview) |
+| `★` | Jak utility / git workflow / explain / pretty / search |
+| `$` | PATH binary |
+| `📁` | Directory |
+| `📄` | File |
+| `▶` | Executable |
+
+**Context-aware path**: `cd Ca<Tab>` → chỉ folders (lệnh `cd / pushd / popd / rmdir / chdir`); các lệnh khác hiện cả files + folders để navigation hoạt động.
+
+---
+
+## Ngôn ngữ
+
+JakShell hỗ trợ **6 ngôn ngữ**:
+
+```bash
+jak lang               # info ngôn ngữ + danh sách
+jak lang en            # đổi sang English + lưu vĩnh viễn
+jak lang reset         # về mặc định (vi)
+```
+
+| Code | Ngôn ngữ | Cờ |
+|------|----------|-----|
+| `vi` | Tiếng Việt (mặc định) | 🇻🇳 |
+| `en` | English | 🇺🇸 |
+| `kr` | 한국어 | 🇰🇷 |
+| `jp` | 日本語 | 🇯🇵 |
+| `cn` | 中文 | 🇨🇳 |
+| `th` | ภาษาไทย | 🇹🇭 |
+
+**Triết lý**: chỉ dịch prose (chào, lời nhắc, mô tả). Thuật ngữ dev (`PID`, `branch`, `permissions`, `RSS`, `staged`, `glob`, …) giữ nguyên tiếng Anh để khớp với tài liệu và phản xạ của developer.
+
+Toàn bộ **106 entry `explain`** đã được dịch đầy đủ (summary + flags + examples + note). Banner / greeting / help / `jak version` cũng đa ngôn ngữ.
+
+Lưu tại `~/.config/jaksh/language` (1 dòng chứa mã).
+
+---
+
+## `ls` tự tô màu
+
+Gõ `ls` (không cần cờ) là đã thấy phân biệt:
+- Thư mục: **bold blue** + dấu `/` cuối
+- File thường: màu mặc định
+- Executable: **green**
+- Symlink: **cyan**
+
+Đạt được bằng:
+- Env var tự đặt: `CLICOLOR=1`, `LSCOLORS` (BSD/macOS), `LS_COLORS` (GNU/Linux). Không ghi đè nếu user đã set.
+- Alias mặc định: `ls=ls -Gp` (macOS) / `ls --color=auto -p` (Linux). User override được qua `[aliases]` trong `~/.jakshrc.toml`.
+
+Khác với `ls -la --jak` (full reformat + chú thích từng cột): chỉ tô màu nhẹ. Đủ dùng hàng ngày.
 
 ---
 
