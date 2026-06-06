@@ -72,13 +72,45 @@ Binary release ~1.4 MB, startup ~10 ms.
 
 ### Yêu cầu
 - macOS hoặc Linux
-- [Rust](https://rustup.rs) (rustup khuyến nghị) — chỉ cần khi build từ source
+- [Rust](https://rustup.rs) (rustup khuyến nghị) — chỉ cần khi build từ source. `bootstrap.sh` / `install.sh` sẽ tự đề nghị cài Rust nếu thiếu.
 - (tuỳ chọn) `git`, `tar`, `curl`, `ripgrep` — cho một số tiện ích `jak …`
 
-### Build và cài đặt
+### Cài nhanh bằng curl (một dòng)
 
 ```bash
-# 1) Clone (nếu lấy từ git)
+curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+```
+
+`bootstrap.sh` sẽ:
+1. Clone repo về `~/.jakshell` (đổi bằng `JAKSH_DIR=...`)
+2. Chạy `install.sh --yes` bên trong: cài Rust nếu cần → `cargo build --release` → copy binary → tạo config mẫu
+3. Ghi đường dẫn source vào `~/.config/jaksh/source-path` để sau này `jak self-update` biết chỗ pull
+
+Biến môi trường tuỳ chỉnh:
+
+```bash
+# Chọn thư mục clone khác
+JAKSH_DIR=$HOME/code/jakshell  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+
+# Cài binary ra chỗ khác (default ~/.local/bin)
+PREFIX=/usr/local/bin  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+
+# Cài theo tag cụ thể thay vì master mới nhất
+JAKSH_REF=v1.0.2  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+```
+
+> Bootstrap **bắt buộc** có `git` (để clone). Nếu thiếu, script in hướng dẫn cài git theo OS rồi thoát.
+
+Đối với `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+```
+
+### Cài thủ công (clone trước rồi build)
+
+```bash
+# 1) Clone
 git clone https://github.com/mockingbitch/jakshell.git
 cd jakshell
 
@@ -638,6 +670,7 @@ gh release create v1.0.2 --notes-file CHANGELOG.md
 JakShell/
 ├── Cargo.toml           # package + dependencies
 ├── build.rs             # nhúng version từ git vào binary
+├── bootstrap.sh         # one-liner curl install (clone + run install.sh)
 ├── install.sh           # build + cài đặt vào ~/.local/bin
 ├── README.md
 ├── LICENSE
