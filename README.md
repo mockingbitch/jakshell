@@ -614,17 +614,59 @@ alias ..=cd ..
 
 ## Đặt làm shell mặc định
 
-```bash
-# Đăng ký JakShell với hệ thống
-echo "$HOME/.local/bin/jaksh" | sudo tee -a /etc/shells
+Thay `bash` / `zsh` bằng JakShell làm login shell.
 
-# Đổi shell mặc định cho user hiện tại
+### Bước 1 — đảm bảo binary đã cài
+
+```bash
+ls -l "$HOME/.local/bin/jaksh"     # phải tồn tại & có quyền x
+```
+
+Chưa có? Chạy `./install.sh` hoặc one-liner `curl … bootstrap.sh | bash` (xem [Cài đặt](#cài-đặt)).
+
+### Bước 2 — đăng ký với hệ thống
+
+`chsh` chỉ chấp nhận shell có mặt trong `/etc/shells`:
+
+```bash
+# Idempotent: chỉ append nếu chưa có
+grep -qxF "$HOME/.local/bin/jaksh" /etc/shells \
+  || echo "$HOME/.local/bin/jaksh" | sudo tee -a /etc/shells
+```
+
+### Bước 3 — đổi shell cho user hiện tại
+
+```bash
 chsh -s "$HOME/.local/bin/jaksh"
 ```
 
-Mở terminal mới — JakShell sẽ là shell login.
+`chsh` sẽ hỏi mật khẩu user. **Mở terminal tab/window mới** — JakShell sẽ là login shell.
 
-> Trên macOS: nếu `chsh` báo `non-standard shell`, kiểm tra `/etc/shells` đã có đường dẫn `jaksh` chưa.
+Kiểm tra:
+
+```bash
+dscl . -read /Users/$USER UserShell   # macOS
+echo $SHELL                            # Linux/macOS, cần terminal mới
+```
+
+### Quay lại zsh / bash
+
+```bash
+chsh -s /bin/zsh        # macOS default
+chsh -s /bin/bash       # nhiều distro Linux
+```
+
+### Sự cố thường gặp
+
+| Triệu chứng | Cách xử lý |
+|-------------|-----------|
+| `chsh: non-standard shell` | Đường dẫn `jaksh` chưa có trong `/etc/shells` → chạy lại Bước 2 |
+| `chsh: PAM authentication failed` | Sai password user. Lưu ý KHÔNG dùng `sudo chsh` — `chsh` đổi shell cho chính user gọi nó |
+| Terminal mới vẫn vào zsh | Một số terminal (iTerm2, VSCode) override shell trong profile/settings — sửa trong `Preferences → Profiles → Command` |
+| Banner JakShell chạy nhưng không gõ được lệnh nào | Có lỗi trong `~/.jakshrc.toml` hoặc `~/.jakshrc` — đổi tên đi (`mv ~/.jakshrc.toml ~/.jakshrc.toml.bak`) rồi thử lại |
+| Lỡ tay set shell sai → đăng nhập lỗi | Đăng nhập qua TTY khác (Linux: Ctrl+Alt+F2) hoặc Recovery Mode rồi `chsh -s /bin/bash` |
+
+> **Khuyến nghị**: trước khi `chsh`, mở 1 terminal jaksh thủ công (`~/.local/bin/jaksh`) và dùng vài ngày. Khi quen mới đổi default — tránh kẹt nếu có bug.
 
 ---
 
