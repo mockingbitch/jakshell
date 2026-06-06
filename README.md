@@ -45,110 +45,65 @@ Gõ ? hoặc help bất cứ lúc nào.
 
 ## Tính năng nổi bật
 
-- **Cú pháp POSIX đầy đủ**: `|`, `&&`, `||`, `;`, `&`, `>`, `>>`, `<`, `2>`, `2>>`, `&>`, glob `* ? [abc]`, biến `$VAR ${VAR}`, tilde `~`, quote `'...' "..."`
-- **Job nền & quản lý job**: `cmd &`, `jobs`, `fg`, `bg`, `kill`
-- **`explain <lệnh>`** — in usage / tham số / ví dụ + **chú thích từng cột giá trị thật** (ls, ps, df, du, free). 70+ lệnh có sẵn chú thích.
-- **Cờ `--jak`** trên `ls / ps / df / du / git status / git branch` — tô màu, decode permissions, icon theo loại file.
-- **`jak …`** — tiện ích cho người dùng phổ thông: `clean`, `backup`, `update`, `find`, `open`, `sysinfo`, `ip`, `weather`, `theme`, `git …`
+- **POSIX-compatible** — pipe `|`, `&&`, `||`, `;`, redirect `> >> < 2> 2>> &>`, job nền, glob, biến, tilde, quote chuẩn.
+- **`explain <lệnh>`** — usage / tham số / ví dụ + chú thích từng cột output thật (ls, ps, df, du, free). 70+ lệnh.
+- **`--jak`** trên `ls / ps / df / du / git status / git branch` — tô màu + format lại.
+- **`jak …`** — `clean / backup / update / find / open / sysinfo / ip / weather / theme / git / version / self-update / lang`.
 - **`bookmark`** — đặt tên cho lệnh dài, chạy qua `jak <name>`.
-- **Prompt thông minh trong git repo**: branch, dirty `*`, ahead `↑N`, behind `↓N`, stash `⚑N`, state `MERGE/REBASE/PICK`.
-- **Đo thời gian thực thi**: dòng `⏱ X ms` sau mỗi lệnh, kèm exit code khi != 0.
-- **Did-you-mean**: gõ sai lệnh → gợi ý lệnh đúng (jaro-winkler).
-- **Banner chào hỏi theo giờ**: 🌅 sáng / ☀️ trưa / 🌤 chiều / 🌆 tối / 🌙 đêm khuya + 1 mẹo ngẫu nhiên.
-- **17 theme dựng sẵn**: `ocean`, `forest`, `sunset`, `mono`, `dracula`, `nord`, `monokai`, `solarized`, `gruvbox`, `tokyo-night`, `catppuccin`, `rose-pine`, `cyberpunk`, `retro`, `paper`, `light`, `default`. `jak theme <tên>` lưu lựa chọn vĩnh viễn.
-- **🌐 6 ngôn ngữ**: `vi / en / kr / jp / cn / th` — `jak lang <code>` đổi & lưu. Toàn bộ 106 entry `explain` được dịch (thuật ngữ dev giữ nguyên).
-- **Inline autosuggest** (fish-style): gợi ý mờ khi gõ, nhấn `→` để chấp nhận.
-- **Tab completion list-mode** với icon: `⚙ builtin · ↪ alias · 🔖 bookmark · ★ jak · 📁 dir · 📄 file · ▶ exec`. `cd <Tab>` chỉ folders.
-- **Hint sau lệnh fail**: in giải thích mã exit (`126 = thiếu quyền x`, `137 = SIGKILL OOM`, …) + gợi ý `--help` hoặc `chmod +x`.
-- **`ls` tự tô màu**: env vars `CLICOLOR/LS_COLORS` + alias mặc định — folder bold blue + `/` cuối, exec green, symlink cyan.
-- **`jak version`** — info chi tiết về binary (commit, build date, rustc) + CHANGELOG nhúng sẵn. **`jak self-update`** — pull + cài lại trong 1 lệnh.
-- **Cấu hình TOML**: `~/.jakshrc.toml` cho theme / prompt / alias / env / timing / greeting; `~/.jakshrc` script khởi động.
+- **Smart git prompt** — branch + dirty `*` + `↑↓` ahead/behind + stash `⚑N` + state `MERGE/REBASE`.
+- **Trải nghiệm gõ lệnh** — inline autosuggest, tab completion list-mode với icon, context-aware path, timing `⏱`, did-you-mean, hint khi fail, `ls` tự tô màu.
+- **🌐 6 ngôn ngữ** — `vi / en / kr / jp / cn / th` (`jak lang <code>`).
+- **17 theme** dựng sẵn, lưu lựa chọn vĩnh viễn.
+- **CLI args** — `jaksh -c "cmd"`, `-l/--login`, `-V/--version`, script file → dùng được trong VSCode / task runner / CI.
+- **`jak version`** render CHANGELOG markdown đẹp; **`jak self-update`** = pull + rebuild 1 lệnh.
 
-Binary release ~1.4 MB, startup ~10 ms.
+Binary release ~1.4 MB · startup ~10 ms.
 
 ---
 
 ## Cài đặt
 
-### Yêu cầu
-- macOS hoặc Linux
-- [Rust](https://rustup.rs) (rustup khuyến nghị) — chỉ cần khi build từ source. `bootstrap.sh` / `install.sh` sẽ tự đề nghị cài Rust nếu thiếu.
-- (tuỳ chọn) `git`, `tar`, `curl`, `ripgrep` — cho một số tiện ích `jak …`
+**Yêu cầu**: macOS hoặc Linux. Rust sẽ tự cài nếu thiếu. Tuỳ chọn: `git / tar / curl / ripgrep` cho một số tiện ích `jak`.
 
-### Cài nhanh bằng curl (một dòng)
+### Cài nhanh bằng curl
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
 ```
 
-`bootstrap.sh` sẽ:
-1. Clone repo về `~/.jakshell` (đổi bằng `JAKSH_DIR=...`)
-2. Chạy `install.sh --yes` bên trong: cài Rust nếu cần → `cargo build --release` → copy binary → tạo config mẫu
-3. Ghi đường dẫn source vào `~/.config/jaksh/source-path` để sau này `jak self-update` biết chỗ pull
+`bootstrap.sh` clone repo về `~/.jakshell` rồi gọi `install.sh --yes` (cài Rust nếu thiếu → `cargo build --release` → copy binary vào `~/.local/bin/jaksh` → tạo config mẫu → ghi source path để `jak self-update` biết nơi pull). Cần `git` sẵn trên máy.
 
-Biến môi trường tuỳ chỉnh:
+Biến môi trường:
 
-```bash
-# Chọn thư mục clone khác
-JAKSH_DIR=$HOME/code/jakshell  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
+| Biến | Mặc định | Mục đích |
+|------|----------|----------|
+| `JAKSH_DIR` | `~/.jakshell` | Thư mục clone |
+| `JAKSH_REF` | `master` | Branch/tag để checkout |
+| `PREFIX` | `~/.local/bin` | Nơi cài binary |
 
-# Cài binary ra chỗ khác (default ~/.local/bin)
-PREFIX=/usr/local/bin  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
-
-# Cài theo tag cụ thể thay vì master mới nhất
-JAKSH_REF=v1.0.2  curl -fsSL https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
-```
-
-> Bootstrap **bắt buộc** có `git` (để clone). Nếu thiếu, script in hướng dẫn cài git theo OS rồi thoát.
-
-Đối với `wget`:
+`wget` variant:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/mockingbitch/jakshell/master/bootstrap.sh | bash
 ```
 
-### Cài thủ công (clone trước rồi build)
+### Cài thủ công
 
 ```bash
-# 1) Clone
-git clone https://github.com/mockingbitch/jakshell.git
-cd jakshell
-
-# 2) Build + cài đặt
-./install.sh
-```
-
-`install.sh` sẽ:
-1. `cargo build --release`
-2. Copy `target/release/jaksh` → `~/.local/bin/jaksh` (đảm bảo `~/.local/bin` ở `PATH`)
-3. Tạo `~/.jakshrc.toml` và `~/.jakshrc` mẫu nếu chưa có
-
-### Chạy thử
-
-```bash
+git clone https://github.com/mockingbitch/jakshell.git && cd jakshell
+./install.sh                # hoặc: cargo build --release
 ~/.local/bin/jaksh
 ```
 
 ### Cập nhật bản mới
 
 ```bash
-# Cách 1: tự động (khuyên dùng)
-jak self-update
-
-# Cách 2: thủ công
-cd /path/to/jakshell        # thư mục đã clone
-git pull --rebase
-./install.sh
+jak self-update             # khuyên dùng — pull + rebuild + cài lại
+# hoặc thủ công:
+cd ~/.jakshell && git pull --rebase && ./install.sh
 ```
 
-`jak self-update` đọc đường dẫn source đã lưu tại `~/.config/jaksh/source-path` (do `install.sh` ghi), chạy `git pull --rebase` rồi `./install.sh --yes`. Mở terminal mới để dùng bản vừa cập nhật.
-
-### Build thủ công (không dùng install.sh)
-
-```bash
-cargo build --release
-./target/release/jaksh
-```
+Mở terminal mới để dùng bản vừa cập nhật.
 
 ---
 
@@ -205,20 +160,9 @@ Mỗi `explain` in 4 phần:
 
 Với `ls -l / ps / df / du / free`: ngoài legend còn **chú thích từng giá trị trên output thật** (decode permissions, map header với row đầu, v.v.).
 
-**Đã có chú thích cho 70+ lệnh**, bao trùm:
-- Điều hướng: `cd`, `pwd`, `ls`, `find`
-- File: `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `ln`, `chmod`, `chown`
-- Xem: `cat`, `less`, `head`, `tail`, `echo`
-- Lọc: `grep`, `sort`, `uniq`, `wc`, `cut`, `tr`, `xargs`
-- Process: `ps`, `top`, `kill`, `pkill`, `killall`
-- Đĩa: `df`, `du`, `free`, `stat`, `lsof`
-- Mạng: `ssh`, `ssh-keygen`, `ssh-copy-id`, `ssh-add`, `sftp`, `scp`, `curl`, `wget`, `ping`, `netstat`, `ss`, `ifconfig`, `ip`
-- Nén: `tar`, `zip`, `unzip`
-- Hệ thống: `uptime`, `who`, `date`, `env`, `alias`, `history`, `which`, `man`
-- Git: `git`, `status`, `log`, `diff`, `branch`, `clone`, `init`, `add`, `commit`, `push`, `pull`, `fetch`, `merge`, `rebase`, `reset`, `restore`, `revert`, `stash`, `tag`, `remote`, `checkout`, `switch`, `cherry-pick`, `blame`, `show`, `reflog`, `config`
-- Docker: `docker`, `ps`, `exec`, `run`, `build`, `images`, `pull`, `push`, `logs`, `stop/start/restart/kill`, `rm`, `rmi`, `inspect`, `network`, `volume`, `compose`, `cp`, `login`, `system`, `tag`
+**70+ lệnh** đã có chú thích: điều hướng (`cd / ls / find`), file (`cp / mv / rm / chmod / chown / ln / …`), xem & filter (`cat / head / tail / grep / sort / uniq / wc / cut / tr / xargs`), process (`ps / top / kill / pkill`), đĩa (`df / du / free / stat / lsof`), mạng (`ssh* / scp / curl / wget / ping / netstat / ss / ip / ifconfig`), nén (`tar / zip`), hệ thống (`uptime / who / date / env / alias / history / which / man`), **Git** (26 sub), **Docker** (20 sub). Chạy `explain list` xem toàn bộ.
 
-> Lệnh destructive (`rm`, `mv`, `chmod`, `kill`, `docker exec`, …) chỉ in legend, KHÔNG tự chạy để tránh thao tác nhầm.
+> Lệnh destructive (`rm / mv / chmod / kill / docker exec / …`) chỉ in legend, KHÔNG tự chạy.
 
 ---
 
@@ -596,7 +540,7 @@ Chạy SAU khi đọc `.jakshrc.toml`. Mỗi dòng là một lệnh shell hợp 
 ```bash
 export PATH=$HOME/.local/bin:$PATH
 alias c=clear
-alias ..=cd ..
+alias ..="cd .."        # nháy kép bắt buộc khi value > 1 từ
 ```
 
 ---
@@ -672,36 +616,14 @@ chsh -s /bin/bash       # nhiều distro Linux
 
 ## Versioning
 
-JakShell nhúng version & build info vào binary lúc compile qua `build.rs`. Xem chi tiết bằng:
+`build.rs` nhúng `git describe --tags --always --dirty=-dirty` vào binary. Xem chi tiết bằng `jak version` (info ngắn + CHANGELOG mới nhất) hoặc `jak version all` (toàn bộ CHANGELOG). Render qua module markdown nội bộ — headings màu, bullet, code fence, link.
 
+Format hiển thị: `v1.0.2` (sạch) · `v1.0.2-3-g91b4d81` (3 commit sau tag) · `v1.0.2-dirty` (có thay đổi chưa commit) · short SHA nếu chưa có tag.
+
+Release version mới:
 ```bash
-jak version          # info ngắn + CHANGELOG mới nhất
-jak version all      # + toàn bộ CHANGELOG
-```
-
-In ra: tag git, commit SHA, commit date, build date, rustc, target, tác giả, link repo.
-
-Phiên bản (hiển thị trong banner) được sinh từ:
-```
-git describe --tags --always --dirty=-dirty
-```
-
-Quy tắc đầu ra:
-- Có tag, working tree sạch: `v1.0.1` → hiện `v1.0.1`
-- Có tag + commit thêm: `v1.0.1-3-g91b4d81` (3 commit sau tag v1.0.1)
-- Working tree dirty: `v1.0.1-dirty` (binary KHÔNG khớp commit tag — có file modified chưa commit)
-- Repo chưa có tag: short SHA, vd `91b4d81`
-- Không có git: fallback `Cargo.toml`'s `version`
-
-Để release version mới:
-```bash
-git add -A && git commit -m "..."
-git tag -a v1.0.2 -m "Release 1.0.2"
-cargo build --release
-./target/release/jaksh   # banner & jak version sẽ hiện v1.0.2
-
-git push && git push origin v1.0.2
-gh release create v1.0.2 --notes-file CHANGELOG.md
+git tag -a vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z
+gh release create vX.Y.Z --notes-file CHANGELOG.md
 ```
 
 ---

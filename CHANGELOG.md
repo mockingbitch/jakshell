@@ -7,6 +7,26 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.3] — Tương thích VSCode + markdown render
+
+### Đã thêm
+
+- **CLI args bash-compatible** — `jaksh -c "cmd"` chạy 1 lệnh rồi exit (tắt banner / greeting / timing / history); kèm `-l/--login`, `-i/--interactive`, `-V/--version`, `-h/--help`, positional script file, `--` separator. Đủ để JakShell làm shell trong **VSCode**, task runner, CI, login shell.
+- **Curl one-liner install** — `bootstrap.sh` clone repo + chạy `install.sh --yes`. Tuỳ chỉnh qua `JAKSH_DIR / JAKSH_REF / PREFIX`. Hỗ trợ cả `wget`.
+- **Markdown → ANSI renderer** (`src/markdown.rs`) — `jak version` / `jak version all` render CHANGELOG đẹp: headings màu, bullet `•`, inline code, bold, code fence với prefix `│`, link `[text](url)`. Iterate UTF-8 char để diacritics Việt không bị phá.
+
+### Đã sửa
+
+- `examples/jakshrc`: dòng `alias ..=cd ..` thiếu nháy kép — từ `..` thứ 2 bị parse thành arg query nên alias builtin in `alias ..='cd'` ra **stdout**, làm bẩn output của `jaksh -c`. Đổi thành `alias ..="cd .."` + comment cảnh báo.
+
+### Tài liệu
+
+- README "Cài đặt" — section curl one-liner + env vars + `wget` variant.
+- README "Đặt làm shell mặc định" — guide 3 bước, kiểm tra `dscl`/`$SHELL`, khôi phục zsh/bash, bảng troubleshooting 5 case (PAM, terminal override, lỗi config, TTY recovery).
+- Banner tip mới: `jak help` / `explain` thay cho tip về `~/.jakshrc.toml`.
+
+---
+
 ## [v1.0.2] — i18n + trải nghiệm gõ lệnh thông minh
 
 ### Đã thêm
@@ -248,6 +268,7 @@ jak theme list          # chọn giao diện
 
 ---
 
+[v1.0.3]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.3
 [v1.0.2]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.2
 [v1.0.1]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.1
 [v1.0.0]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.0
