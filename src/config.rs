@@ -51,6 +51,13 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
         let content = std::fs::read_to_string(&script_path)?;
         run_script(shell, &content)?;
     }
+
+    // Theme đã lưu qua `jak theme <name>` được áp CUỐI cùng (last-wins).
+    if let Some(name) = crate::jak::saved_theme_name() {
+        if let Some(t) = crate::theme::by_name(&name) {
+            shell.borrow_mut().theme = t;
+        }
+    }
     Ok(())
 }
 

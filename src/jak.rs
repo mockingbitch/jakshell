@@ -96,9 +96,9 @@ fn help() -> Result<i32> {
         ("backup <thư_mục>", "Nén thư mục thành .tar.gz với tên-ngày-giờ"),
         ("update", "Tự dò brew/apt/dnf/pacman và chạy update + upgrade"),
         ("find <tên>", "Tìm file/thư mục (gõ `jak find help` để xem chế độ nâng cao: file/dir/text/big/recent/empty)"),
-        ("open <đường_dẫn>", "Mở bằng ứng dụng mặc định (open/xdg-open)"),
+        ("open <app|path|url>", "Mở app (chrome/vscode/slack/zalo…), file, hay URL. Gõ `jak open list`."),
         ("sysinfo", "In thông tin máy: OS, CPU, RAM, đĩa"),
-        ("theme <tên>", "Đổi giao diện: ocean | forest | sunset | mono | default"),
+        ("theme <tên>", "Đổi giao diện (lưu lựa chọn) — gõ `jak theme list` để xem 17 theme"),
         ("ip", "In địa chỉ IP nội bộ và public"),
         ("weather [thành phố]", "Xem thời tiết (qua wttr.in)"),
         ("git <save|sync|undo|wip|...>", "Workflow git: gõ `jak git` để xem chi tiết"),
@@ -326,14 +326,277 @@ fn update() -> Result<i32> {
     Ok(127)
 }
 
+// ─── jak open ─────────────────────────────────────────────────────────────────
+
+/// Mapping: (alias chuẩn-hoá lowercase, tên app macOS, binary trên Linux)
+/// Để rỗng nếu không có trên platform tương ứng.
+const APP_ALIASES: &[(&str, &str, &str)] = &[
+    // ── Browser ──
+    ("chrome",       "Google Chrome",         "google-chrome"),
+    ("googlechrome", "Google Chrome",         "google-chrome"),
+    ("firefox",      "Firefox",               "firefox"),
+    ("safari",       "Safari",                ""),
+    ("edge",         "Microsoft Edge",        "microsoft-edge"),
+    ("brave",        "Brave Browser",         "brave-browser"),
+    ("opera",        "Opera",                 "opera"),
+    ("arc",          "Arc",                   ""),
+    ("zen",          "Zen Browser",           "zen-browser"),
+
+    // ── Editor / IDE ──
+    ("code",         "Visual Studio Code",    "code"),
+    ("vscode",       "Visual Studio Code",    "code"),
+    ("visualcode",   "Visual Studio Code",    "code"),
+    ("visualstudiocode", "Visual Studio Code","code"),
+    ("cursor",       "Cursor",                "cursor"),
+    ("sublime",      "Sublime Text",          "subl"),
+    ("subl",         "Sublime Text",          "subl"),
+    ("atom",         "Atom",                  "atom"),
+    ("intellij",     "IntelliJ IDEA",         "idea"),
+    ("idea",         "IntelliJ IDEA",         "idea"),
+    ("pycharm",      "PyCharm",               "pycharm"),
+    ("webstorm",     "WebStorm",              "webstorm"),
+    ("goland",       "GoLand",                "goland"),
+    ("rider",        "Rider",                 "rider"),
+    ("phpstorm",     "PhpStorm",              "phpstorm"),
+    ("clion",        "CLion",                 "clion"),
+    ("xcode",        "Xcode",                 ""),
+    ("androidstudio","Android Studio",        "android-studio"),
+    ("zed",          "Zed",                   "zed"),
+    ("nova",         "Nova",                  ""),
+
+    // ── Terminal ──
+    ("terminal",     "Terminal",              "gnome-terminal"),
+    ("iterm",        "iTerm",                 ""),
+    ("iterm2",       "iTerm",                 ""),
+    ("warp",         "Warp",                  "warp-terminal"),
+    ("alacritty",    "Alacritty",             "alacritty"),
+    ("kitty",        "Kitty",                 "kitty"),
+    ("hyper",        "Hyper",                 "hyper"),
+    ("wezterm",      "WezTerm",               "wezterm"),
+    ("tabby",        "Tabby",                 "tabby"),
+
+    // ── Chat / Communication ──
+    ("slack",        "Slack",                 "slack"),
+    ("discord",      "Discord",               "discord"),
+    ("zoom",         "zoom.us",               "zoom"),
+    ("teams",        "Microsoft Teams",       "teams"),
+    ("telegram",     "Telegram",              "telegram-desktop"),
+    ("whatsapp",     "WhatsApp",              "whatsapp"),
+    ("zalo",         "Zalo",                  "zalo"),
+    ("signal",       "Signal",                "signal-desktop"),
+    ("messenger",    "Messenger",             ""),
+    ("skype",        "Skype",                 "skype"),
+
+    // ── Media / Entertainment ──
+    ("spotify",      "Spotify",               "spotify"),
+    ("vlc",          "VLC",                   "vlc"),
+
+    // ── Productivity / Notes ──
+    ("notion",       "Notion",                "notion-app"),
+    ("obsidian",     "Obsidian",              "obsidian"),
+    ("evernote",     "Evernote",              "evernote"),
+    ("todoist",      "Todoist",               "todoist"),
+    ("things",       "Things",                ""),
+
+    // ── Design ──
+    ("figma",        "Figma",                 "figma-linux"),
+    ("sketch",       "Sketch",                ""),
+    ("photoshop",    "Adobe Photoshop 2024",  ""),
+    ("illustrator",  "Adobe Illustrator 2024",""),
+    ("xd",           "Adobe XD",              ""),
+    ("affinity",     "Affinity Designer",     ""),
+    ("canva",        "Canva",                 "canva"),
+
+    // ── Dev tools ──
+    ("postman",      "Postman",               "postman"),
+    ("insomnia",     "Insomnia",              "insomnia"),
+    ("docker",       "Docker",                "docker-desktop"),
+    ("dockerdesktop","Docker",                "docker-desktop"),
+    ("githubdesktop","GitHub Desktop",        "github-desktop"),
+    ("sourcetree",   "Sourcetree",            ""),
+    ("gitkraken",    "GitKraken",             "gitkraken"),
+    ("tableplus",    "TablePlus",             ""),
+    ("sequel",       "Sequel Ace",            ""),
+    ("dbeaver",      "DBeaver",               "dbeaver"),
+    ("ngrok",        "ngrok",                 "ngrok"),
+
+    // ── System / macOS apps ──
+    ("finder",       "Finder",                ""),
+    ("files",        "",                      "nautilus"),
+    ("preview",      "Preview",               ""),
+    ("calculator",   "Calculator",            "gnome-calculator"),
+    ("calc",         "Calculator",            "gnome-calculator"),
+    ("settings",     "System Settings",       "gnome-control-center"),
+    ("preferences",  "System Settings",       "gnome-control-center"),
+    ("activity",     "Activity Monitor",      "gnome-system-monitor"),
+    ("monitor",      "Activity Monitor",      "gnome-system-monitor"),
+    ("appstore",     "App Store",             ""),
+    ("disk",         "Disk Utility",          "gnome-disks"),
+    ("keychain",     "Keychain Access",       ""),
+
+    // ── macOS built-ins ──
+    ("mail",         "Mail",                  "thunderbird"),
+    ("calendar",     "Calendar",              "gnome-calendar"),
+    ("notes",        "Notes",                 ""),
+    ("messages",     "Messages",              ""),
+    ("music",        "Music",                 ""),
+    ("photos",       "Photos",                "gnome-photos"),
+    ("maps",         "Maps",                  ""),
+    ("reminders",    "Reminders",             ""),
+
+    // ── Cloud / Storage ──
+    ("dropbox",      "Dropbox",               "dropbox"),
+    ("drive",        "Google Drive",          ""),
+
+    // ── Misc ──
+    ("rectangle",    "Rectangle",             ""),
+    ("raycast",      "Raycast",               ""),
+    ("alfred",       "Alfred",                ""),
+    ("magnet",       "Magnet",                ""),
+    ("1password",    "1Password",             "1password"),
+    ("bitwarden",    "Bitwarden",             "bitwarden"),
+];
+
+/// URL "shortcut" — gõ `jak open <key>` thì mở URL trong browser.
+const URL_ALIASES: &[(&str, &str)] = &[
+    ("youtube",   "https://www.youtube.com"),
+    ("netflix",   "https://www.netflix.com"),
+    ("gmail",     "https://mail.google.com"),
+    ("github",    "https://github.com"),
+    ("gitlab",    "https://gitlab.com"),
+    ("stackoverflow", "https://stackoverflow.com"),
+    ("chatgpt",   "https://chat.openai.com"),
+    ("claude",    "https://claude.ai"),
+    ("gemini",    "https://gemini.google.com"),
+    ("translate", "https://translate.google.com"),
+];
+
 fn open(args: &[&str]) -> Result<i32> {
-    let target = args.first().copied().unwrap_or(".");
+    let first = args.first().copied().unwrap_or(".");
+    match first {
+        "help" | "?" | "--help" | "-h" => { open_help(); return Ok(0); }
+        "list" | "apps" => { open_list(); return Ok(0); }
+        _ => {}
+    }
+
+    let key = first.to_lowercase().replace([' ', '-', '_'], "");
+    let rest: Vec<&str> = args.iter().skip(1).copied().collect();
+
+    // 1) Khớp app alias?
+    if let Some((_, mac_app, linux_bin)) = APP_ALIASES.iter().find(|(k, _, _)| *k == key) {
+        return open_app(mac_app, linux_bin, &rest, first);
+    }
+    // 2) Khớp URL alias?
+    if let Some((_, url)) = URL_ALIASES.iter().find(|(k, _)| *k == key) {
+        return open_url(url);
+    }
+    // 3) File / path / URL — đẩy cho open / xdg-open xử lý
+    open_default(args)
+}
+
+fn open_help() {
+    println!("\x1b[1mjak open — mở app, file, hoặc URL\x1b[0m\n");
+    let items: &[(&str, &str)] = &[
+        ("jak open <app>",     "mở app theo alias (vd: chrome, vscode, slack, zalo, figma)"),
+        ("jak open <app> <file>", "mở file BẰNG app (macOS: open -a <App> <file>)"),
+        ("jak open <url>",     "mở URL trong browser mặc định"),
+        ("jak open <path>",    "mở file / thư mục bằng app mặc định của OS"),
+        ("jak open list",      "liệt kê toàn bộ alias app có sẵn"),
+        ("jak open .",         "mở thư mục hiện tại bằng Finder / file manager"),
+    ];
+    for (cmd, desc) in items {
+        println!("  \x1b[36m{:24}\x1b[0m {}", cmd, desc);
+    }
+    println!("\n\x1b[2mKhông tìm thấy alias? → tự fallback sang `open` (macOS) / `xdg-open` (Linux).\x1b[0m");
+}
+
+fn open_list() {
+    println!("\x1b[1mApp alias ({}):\x1b[0m", APP_ALIASES.len());
+    let cols = 4usize;
+    let w = APP_ALIASES.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);
+    for chunk in APP_ALIASES.chunks(cols) {
+        for (k, _, _) in chunk {
+            print!("  \x1b[36m{:<w$}\x1b[0m", k, w = w);
+        }
+        println!();
+    }
+    println!("\n\x1b[1mURL alias ({}):\x1b[0m", URL_ALIASES.len());
+    for (k, url) in URL_ALIASES {
+        println!("  \x1b[36m{:<14}\x1b[0m \x1b[2m→\x1b[0m {}", k, url);
+    }
+    println!("\n\x1b[2mGõ: jak open <tên>\x1b[0m");
+}
+
+#[cfg(target_os = "macos")]
+fn open_app(mac_app: &str, _linux_bin: &str, extra: &[&str], requested: &str) -> Result<i32> {
+    if mac_app.is_empty() {
+        eprintln!("'{}' không có trên macOS.", requested);
+        return Ok(1);
+    }
+    let mut args: Vec<&str> = vec!["-a", mac_app];
+    args.extend(extra);
+    println!("\x1b[2m$ open -a \"{}\"{}\x1b[0m",
+        mac_app,
+        if extra.is_empty() { String::new() } else { format!(" {}", extra.join(" ")) }
+    );
+    Ok(run_or_warn("open", &args, ""))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_app(_mac_app: &str, linux_bin: &str, extra: &[&str], requested: &str) -> Result<i32> {
+    if linux_bin.is_empty() {
+        eprintln!("'{}' không có alias Linux. Thử gõ binary trực tiếp.", requested);
+        return Ok(1);
+    }
+    if !has_cmd(linux_bin) {
+        warn_missing(linux_bin, "App này chưa được cài hoặc không có trên PATH.");
+        return Ok(127);
+    }
+    spawn_detached_ok(linux_bin, extra)
+}
+
+fn open_url(url: &str) -> Result<i32> {
+    if cfg!(target_os = "macos") {
+        println!("\x1b[2m$ open {}\x1b[0m", url);
+        Ok(run_or_warn("open", &[url], ""))
+    } else {
+        println!("\x1b[2m$ xdg-open {}\x1b[0m", url);
+        Ok(run_or_warn("xdg-open", &[url], "Cài: sudo apt install xdg-utils"))
+    }
+}
+
+fn open_default(args: &[&str]) -> Result<i32> {
     let (cmd, hint) = if cfg!(target_os = "macos") {
         ("open", "")
     } else {
         ("xdg-open", "Cài: `sudo apt install xdg-utils` (Debian/Ubuntu) hoặc tương đương.")
     };
-    Ok(run_or_warn(cmd, &[target], hint))
+    Ok(run_or_warn(cmd, args, hint))
+}
+
+/// Spawn lệnh GUI Linux dạng detached — không block shell, đóng stdin/out/err.
+#[cfg(not(target_os = "macos"))]
+fn spawn_detached_ok(prog: &str, args: &[&str]) -> Result<i32> {
+    use std::process::Stdio;
+    println!("\x1b[2m$ {} {} &\x1b[0m", prog, args.join(" "));
+    match Command::new(prog)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            let pid = child.id();
+            std::mem::forget(child);
+            println!("\x1b[2m✓ đã khởi động (pid {})\x1b[0m", pid);
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("\x1b[31mkhông chạy được {}: {}\x1b[0m", prog, e);
+            Ok(126)
+        }
+    }
 }
 
 fn sysinfo() -> Result<i32> {
@@ -356,22 +619,157 @@ fn sysinfo() -> Result<i32> {
 }
 
 fn theme(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    let name = args.first().copied().unwrap_or("default");
-    let mut t = crate::theme::Theme::default();
-    match name {
-        "ocean" => { t.accent = "bright_cyan".into(); t.arrow = "❯".into(); }
-        "forest" => { t.accent = "bright_green".into(); t.arrow = "→".into(); }
-        "sunset" => { t.accent = "bright_magenta".into(); t.arrow = "✦".into(); }
-        "mono" => { t.accent = "white".into(); t.use_color = false; t.arrow = ">".into(); }
-        "default" => {}
-        _ => {
-            eprintln!("theme không rõ: {}. có sẵn: ocean | forest | sunset | mono | default", name);
+    let sub = args.first().copied().unwrap_or("show");
+    match sub {
+        "list" | "ls" => theme_list(),
+        "show" | "current" => theme_show(shell),
+        "reset" | "default" => theme_reset(shell),
+        "help" | "?" | "--help" | "-h" => {
+            theme_help();
+            Ok(0)
+        }
+        name => theme_apply(shell, name, true),
+    }
+}
+
+fn theme_help() {
+    println!("\x1b[1mjak theme — quản lý giao diện\x1b[0m\n");
+    let items: &[(&str, &str)] = &[
+        ("jak theme",              "= jak theme show — in theme hiện tại"),
+        ("jak theme list",         "liệt kê tất cả theme có sẵn (kèm preview)"),
+        ("jak theme <name>",       "đổi sang theme & LƯU lựa chọn cho lần mở sau"),
+        ("jak theme reset",        "xoá lựa chọn lưu, dùng theme từ ~/.jakshrc.toml (hoặc default)"),
+    ];
+    for (cmd, desc) in items {
+        println!("  \x1b[36m{:24}\x1b[0m {}", cmd, desc);
+    }
+    println!(
+        "\n\x1b[2mLưu tại: ~/.config/jaksh/theme  (xoá file này = reset)\x1b[0m"
+    );
+}
+
+fn theme_list() -> Result<i32> {
+    let saved = saved_theme_name();
+    println!("\x1b[1mTheme có sẵn ({}):\x1b[0m", crate::theme::BUILTIN_NAMES.len());
+    let w = crate::theme::BUILTIN_NAMES.iter().map(|n| n.len()).max().unwrap_or(0);
+    for name in crate::theme::BUILTIN_NAMES {
+        let t = match crate::theme::by_name(name) {
+            Some(t) => t,
+            None => continue,
+        };
+        let accent = t.accent_ansi();
+        let dim = t.dim_ansi();
+        let reset = if t.use_color { "\x1b[0m" } else { "" };
+        let marker = if saved.as_deref() == Some(*name) { "● " }
+                     else { "  " };
+        // Preview: tên theo accent + mũi tên + tên thư mục giả
+        let preview = format!(
+            "{accent}{name:<w$}{reset}  {dim}~/code{reset} {accent}{arrow}{reset}",
+            accent = accent,
+            name = name,
+            reset = reset,
+            dim = dim,
+            arrow = t.arrow,
+            w = w,
+        );
+        println!("{marker}{preview}  \x1b[2m{}\x1b[0m", crate::theme::describe(name));
+    }
+    println!();
+    if let Some(s) = saved {
+        println!("\x1b[2m● = đã lưu trong ~/.config/jaksh/theme  (hiện: {})\x1b[0m", s);
+    } else {
+        println!("\x1b[2m(chưa có theme lưu — dùng `jak theme <name>` để lưu)\x1b[0m");
+    }
+    Ok(0)
+}
+
+fn theme_show(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+    let t = &shell.borrow().theme;
+    let accent = t.accent_ansi();
+    let reset = if t.use_color { "\x1b[0m" } else { "" };
+    println!("Theme hiện tại (in-memory):");
+    println!("  accent           = {accent}{}{reset}", t.accent);
+    println!("  success          = {}", t.success);
+    println!("  error            = {}", t.error);
+    println!("  dim              = {}", t.dim);
+    println!("  arrow            = {accent}{}{reset}", t.arrow);
+    println!("  git_branch_icon  = '{}'", t.git_branch_icon);
+    println!("  use_color        = {}", t.use_color);
+    match saved_theme_name() {
+        Some(name) => println!("\nLưu trên đĩa: \x1b[36m{}\x1b[0m  ({})", name, theme_file().display()),
+        None => println!("\n\x1b[2m(không có lựa chọn lưu trên đĩa)\x1b[0m"),
+    }
+    Ok(0)
+}
+
+fn theme_apply(shell: &Rc<RefCell<Shell>>, name: &str, save: bool) -> Result<i32> {
+    let t = match crate::theme::by_name(name) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "theme không rõ: '{}'. Gõ `jak theme list` để xem danh sách.",
+                name
+            );
             return Ok(1);
         }
-    }
+    };
+    let accent = t.accent_ansi();
+    let arrow = t.arrow.clone();
+    let reset = if t.use_color { "\x1b[0m" } else { "" };
     shell.borrow_mut().theme = t;
-    println!("✓ đã đổi sang theme '{}'.", name);
+    if save {
+        match save_theme_name(name) {
+            Ok(_) => println!(
+                "\x1b[32m✓\x1b[0m đã đổi sang theme {accent}{name}{reset} {accent}{arrow}{reset}  \x1b[2m(đã lưu)\x1b[0m"
+            ),
+            Err(e) => println!(
+                "\x1b[32m✓\x1b[0m đã đổi sang theme '{name}' \x1b[33m(không lưu được: {e})\x1b[0m"
+            ),
+        }
+    } else {
+        println!("\x1b[32m✓\x1b[0m đã đổi sang theme {accent}{name}{reset}");
+    }
     Ok(0)
+}
+
+fn theme_reset(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+    let path = theme_file();
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            eprintln!("\x1b[33m⚠ không xoá được {}: {}\x1b[0m", path.display(), e);
+            return Ok(1);
+        }
+        println!("\x1b[32m✓\x1b[0m đã xoá theme đã lưu. Lần sau mở shell sẽ dùng theme từ ~/.jakshrc.toml hoặc default.");
+    } else {
+        println!("\x1b[2m(không có theme đã lưu — không cần xoá)\x1b[0m");
+    }
+    // Áp default ngay
+    shell.borrow_mut().theme = crate::theme::Theme::default();
+    println!("In-memory đã đổi về \x1b[36mdefault\x1b[0m.");
+    Ok(0)
+}
+
+// ─── Lưu / đọc theme đã chọn ──────────────────────────────────────────────────
+
+pub fn theme_file() -> std::path::PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".config").join("jaksh").join("theme"))
+        .unwrap_or_else(|| std::path::PathBuf::from("theme"))
+}
+
+pub fn saved_theme_name() -> Option<String> {
+    let content = std::fs::read_to_string(theme_file()).ok()?;
+    let name = content.trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn save_theme_name(name: &str) -> Result<()> {
+    let path = theme_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, name)?;
+    Ok(())
 }
 
 fn weather(args: &[&str]) -> Result<i32> {
