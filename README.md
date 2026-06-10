@@ -503,6 +503,10 @@ arrow = "❯"
 git_branch_icon = " "
 use_color = true
 
+[ui]
+blank_line = true           # dòng trống giữa các khối lệnh (dễ nhìn lại output cũ)
+separator = "none"          # "line" = thêm đường kẻ mờ ngang giữa các khối
+
 [timing]
 enabled = true
 threshold_ms = 0
@@ -549,7 +553,7 @@ alias ..="cd .."        # nháy kép bắt buộc khi value > 1 từ
 
 | Đường dẫn | Mục đích |
 |-----------|----------|
-| `~/.jakshrc.toml` | Cấu hình chính (theme, prompt, alias, env, timing, greeting) |
+| `~/.jakshrc.toml` | Cấu hình chính (theme, prompt, ui, alias, env, timing, greeting) |
 | `~/.jakshrc` | Script khởi động (chạy mỗi khi mở shell) |
 | `~/.config/jaksh/history` | Lịch sử lệnh |
 | `~/.config/jaksh/bookmarks.toml` | Bookmark do `bookmark` quản lý |

@@ -15,6 +15,27 @@ pub struct Shell {
     pub prompt_template: String,
     pub timing: TimingConfig,
     pub greeting: GreetingConfig,
+    pub ui: UiConfig,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// In 1 dòng trống trước mỗi prompt (trừ prompt đầu) để các khối lệnh
+    /// tách biệt nhau, dễ nhìn lại output cũ.
+    pub blank_line: bool,
+    /// Đường kẻ phân cách giữa các khối lệnh: "none" hoặc "line" (kẻ mờ
+    /// ngang hết chiều rộng terminal).
+    pub separator: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            blank_line: true,
+            separator: "none".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -103,6 +124,7 @@ impl Shell {
             prompt_template: default_prompt_template(),
             timing: TimingConfig::default(),
             greeting: GreetingConfig::default(),
+            ui: UiConfig::default(),
         })
     }
 

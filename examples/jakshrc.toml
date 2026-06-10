@@ -14,6 +14,13 @@ arrow = "❯"
 git_branch_icon = " "
 use_color = true
 
+[ui]
+# In 1 dòng trống trước mỗi prompt để các khối lệnh tách biệt nhau,
+# dễ nhìn lại output cũ. false = prompt sát nhau như bash/zsh truyền thống.
+blank_line = true
+# Đường kẻ mờ ngang giữa các khối lệnh: "none" hoặc "line"
+separator = "none"
+
 [timing]
 # Hiển thị thời gian thực thi sau mỗi lệnh
 enabled = true

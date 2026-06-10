@@ -85,7 +85,13 @@ fn main() -> Result<()> {
 
     print_welcome(&shell);
 
+    let mut first_prompt = true;
     loop {
+        if first_prompt {
+            first_prompt = false;
+        } else {
+            print_block_separator(&shell.borrow());
+        }
         let prompt_str = prompt::render(&shell.borrow());
         match rl.readline(&prompt_str) {
             Ok(line) => {
@@ -151,6 +157,23 @@ fn run_line(shell: &Rc<RefCell<Shell>>, line: &str) -> Result<i32> {
     let tokens = lexer::tokenize(line)?;
     let ast = parser::parse(&tokens)?;
     executor::execute(shell, &ast)
+}
+
+/// Tách các khối lệnh trong REPL cho dễ nhìn lại output cũ: in dòng trống
+/// và/hoặc đường kẻ mờ TRƯỚC mỗi prompt (trừ prompt đầu tiên sau banner).
+fn print_block_separator(shell: &Shell) {
+    let ui = &shell.ui;
+    if ui.blank_line {
+        println!();
+    }
+    if ui.separator == "line" {
+        let width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+        let dim = if shell.theme.use_color { "\x1b[2m" } else { "" };
+        let reset = if shell.theme.use_color { "\x1b[0m" } else { "" };
+        println!("{dim}{}{reset}", "─".repeat(width));
+    }
 }
 
 fn print_timing(shell: &Shell, elapsed: std::time::Duration, code: i32) {
