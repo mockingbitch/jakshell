@@ -17,8 +17,14 @@ use crate::shell::Shell;
 
 /// Có nên chạy ở chế độ pretty cho lệnh `cmd` này không?
 pub fn supports(cmd: &str) -> bool {
-    matches!(cmd, "ls" | "ps" | "df" | "du" | "git")
+    matches!(cmd, "ls" | "ps" | "df" | "du" | "git" | "curl")
 }
+
+/// Marker ghi qua `curl -w` để lấy status/content-type/thời gian mà không cần
+/// parse header. Nằm trên stdout SAU body — pretty_curl tách ra trước khi in.
+const CURL_META_START: &str = "<<JAK|";
+const CURL_META_END: &str = ">>";
+const CURL_WRITE_OUT: &str = "\n<<JAK|%{http_code}|%{content_type}|%{time_total}>>";
 
 pub fn run(
     shell: &Rc<RefCell<Shell>>,
@@ -33,6 +39,12 @@ pub fn run(
     // Với git: ép màu ngay cả khi pipe (vì ta capture stdout)
     if cmd == "git" {
         builder.arg("-c").arg("color.ui=always");
+    }
+    // Với curl: -sS tắt progress meter (stdout bị capture nên meter sẽ thành
+    // rác trên stderr) nhưng vẫn hiện lỗi; -w ghi marker meta sau body.
+    // User truyền -w riêng thì flag của họ (đứng sau) thắng — chỉ mất dòng meta.
+    if cmd == "curl" {
+        builder.arg("-sS").arg("-w").arg(CURL_WRITE_OUT);
     }
     builder.args(&args);
     builder.current_dir(&shell.borrow().cwd);
@@ -58,6 +70,7 @@ pub fn run(
         "df" => pretty_df(&text, use_color),
         "du" => pretty_du(&text, use_color),
         "git" => pretty_git(&text, &args, use_color),
+        "curl" => pretty_curl(&text, use_color),
         _ => {
             // Không có prettifier — in raw
             print!("{}", text);
@@ -776,5 +789,204 @@ fn pretty_du(out: &str, color: bool) {
             path.clone()
         };
         println!("{}{}  {}", size_c, pad, path_c);
+    }
+}
+
+// ─── curl ─────────────────────────────────────────────────────────────────────
+
+/// In response của curl: đường ngăn cách (HTTP status · content-type · thời
+/// gian) tách phần lệnh phía trên với phần response, body JSON được indent +
+/// tô màu. Body không phải JSON in nguyên si.
+///
+/// stdout capture có dạng: `<body><marker><body><marker>...` (curl ghi marker
+/// `-w` sau MỖI transfer — nhiều URL = nhiều cặp). Phần đuôi không có marker
+/// (user tự truyền -w đè) in như một segment không meta.
+fn pretty_curl(out: &str, color: bool) {
+    let mut rest = out;
+    let mut printed = false;
+    while let Some(pos) = rest.find(CURL_META_START) {
+        let body = &rest[..pos];
+        let after = &rest[pos + CURL_META_START.len()..];
+        let Some(end) = after.find(CURL_META_END) else { break };
+        let meta = &after[..end];
+        rest = &after[end + CURL_META_END.len()..];
+        print_curl_segment(body, Some(meta), color);
+        printed = true;
+    }
+    if !rest.trim().is_empty() || !printed {
+        print_curl_segment(rest, None, color);
+    }
+}
+
+fn print_curl_segment(body: &str, meta: Option<&str>, color: bool) {
+    // marker bắt đầu bằng \n nên body thường dư 1 newline cuối
+    let body = body.strip_suffix('\n').unwrap_or(body);
+
+    // curl fail trước khi nhận response (status 000, không body) — lỗi đã in
+    // ra stderr rồi, separator chỉ là rác → bỏ.
+    if body.trim().is_empty() && meta.map_or(false, |m| m.starts_with("000|")) {
+        return;
+    }
+
+    // ── đường ngăn cách: HTTP status · content-type · thời gian ──
+    let label = match meta {
+        Some(m) => {
+            let mut it = m.splitn(3, '|');
+            let status = it.next().unwrap_or("");
+            let ctype = it.next().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
+            let time = it.next().unwrap_or("");
+            let status_col = match status.chars().next() {
+                Some('2') => BRIGHT_GREEN,
+                Some('3') => YELLOW,
+                Some('4') | Some('5') => RED,
+                _ => DIM,
+            };
+            let time_fmt = time
+                .parse::<f64>()
+                .map(format_curl_time)
+                .unwrap_or_default();
+            let mut parts = Vec::new();
+            if !status.is_empty() && status != "000" {
+                parts.push(format!("{}{}HTTP {}{}", c(color, BOLD), c(color, status_col), status, c(color, RESET)));
+            }
+            if !ctype.is_empty() {
+                parts.push(format!("{}{}{}", c(color, CYAN), ctype, c(color, RESET)));
+            }
+            if !time_fmt.is_empty() {
+                parts.push(format!("{}{}{}", c(color, DIM), time_fmt, c(color, RESET)));
+            }
+            parts.join(&format!("{} · {}", c(color, DIM), c(color, RESET)))
+        }
+        None => format!("{}response{}", c(color, DIM), c(color, RESET)),
+    };
+    let width = term_width().min(100);
+    // độ dài hiển thị của label (bỏ mã ANSI) để vẽ phần gạch còn lại cho đủ
+    let visible = strip_ansi_len(&label);
+    let lead = 2usize;
+    let tail = width.saturating_sub(lead + visible + 4).max(4);
+    println!(
+        "{}{}{} {} {}{}{}",
+        c(color, DIM), "─".repeat(lead), c(color, RESET),
+        label,
+        c(color, DIM), "─".repeat(tail), c(color, RESET),
+    );
+
+    if body.trim().is_empty() {
+        return;
+    }
+
+    // ── body: JSON → indent + màu; khác → in nguyên si ──
+    match serde_json::from_str::<serde_json::Value>(body.trim()) {
+        Ok(v) => {
+            let mut s = String::new();
+            write_json(&v, 0, color, &mut s);
+            println!("{}", s);
+        }
+        Err(_) => println!("{}", body),
+    }
+}
+
+fn format_curl_time(secs: f64) -> String {
+    if secs < 1.0 {
+        format!("{:.0} ms", secs * 1000.0)
+    } else {
+        format!("{:.2} s", secs)
+    }
+}
+
+fn term_width() -> usize {
+    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+}
+
+/// Số ký tự hiển thị (bỏ escape ANSI `\x1b[...m`).
+fn strip_ansi_len(s: &str) -> usize {
+    let mut n = 0usize;
+    let mut in_esc = false;
+    for ch in s.chars() {
+        if in_esc {
+            if ch == 'm' {
+                in_esc = false;
+            }
+        } else if ch == '\x1b' {
+            in_esc = true;
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Pretty-print JSON có màu: key cyan, string xanh, số vàng, bool/null magenta.
+fn write_json(v: &serde_json::Value, indent: usize, color: bool, out: &mut String) {
+    use serde_json::Value::*;
+    let pad = "  ".repeat(indent);
+    let pad_in = "  ".repeat(indent + 1);
+    match v {
+        Object(map) if map.is_empty() => out.push_str("{}"),
+        Object(map) => {
+            out.push_str("{\n");
+            for (i, (k, val)) in map.iter().enumerate() {
+                out.push_str(&format!(
+                    "{}{}{:?}{}: ",
+                    pad_in, c(color, CYAN), k, c(color, RESET),
+                ));
+                write_json(val, indent + 1, color, out);
+                if i + 1 < map.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push('}');
+        }
+        Array(arr) if arr.is_empty() => out.push_str("[]"),
+        Array(arr) => {
+            out.push_str("[\n");
+            for (i, val) in arr.iter().enumerate() {
+                out.push_str(&pad_in);
+                write_json(val, indent + 1, color, out);
+                if i + 1 < arr.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+        }
+        String(s) => out.push_str(&format!("{}{:?}{}", c(color, GREEN), s, c(color, RESET))),
+        Number(n) => out.push_str(&format!("{}{}{}", c(color, YELLOW), n, c(color, RESET))),
+        Bool(b) => out.push_str(&format!("{}{}{}", c(color, MAGENTA), b, c(color, RESET))),
+        Null => out.push_str(&format!("{}null{}", c(color, MAGENTA), c(color, RESET))),
+    }
+}
+
+#[cfg(test)]
+mod curl_tests {
+    use super::*;
+
+    #[test]
+    fn write_json_indents_and_keeps_order() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"z": 1, "a": {"nested": [true, null]}}"#).unwrap();
+        let mut s = String::new();
+        write_json(&v, 0, false, &mut s);
+        // preserve_order: "z" phải đứng trước "a"
+        assert!(s.find("\"z\"").unwrap() < s.find("\"a\"").unwrap());
+        assert_eq!(
+            s,
+            "{\n  \"z\": 1,\n  \"a\": {\n    \"nested\": [\n      true,\n      null\n    ]\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_len_ignores_escapes() {
+        assert_eq!(strip_ansi_len("\x1b[1m\x1b[92mHTTP 200\x1b[0m"), 8);
+        assert_eq!(strip_ansi_len("plain"), 5);
+    }
+
+    #[test]
+    fn format_curl_time_units() {
+        assert_eq!(format_curl_time(0.005), "5 ms");
+        assert_eq!(format_curl_time(2.345), "2.35 s");
     }
 }

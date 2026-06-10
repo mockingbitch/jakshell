@@ -53,6 +53,12 @@ fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> 
                     let cleaned: Vec<String> = argv.iter().filter(|s| *s != "--jak").cloned().collect();
                     return crate::pretty::run(shell, &cleaned, &cmd.redirects);
                 }
+                // curl tương tác: tự động capture + format response (separator
+                // + pretty JSON). CHỈ khi stdout là TTY và không redirect —
+                // pipe (`curl | jq`) hay `> file` vẫn nhận raw output như cũ.
+                if head == "curl" && cmd.redirects.is_empty() && stdout_is_tty() {
+                    return crate::pretty::run(shell, &argv, &cmd.redirects);
+                }
             }
         }
 
@@ -284,4 +290,9 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
         last_code = status.code().unwrap_or(1);
     }
     Ok(last_code)
+}
+
+/// stdout có phải terminal không — quyết định có bật auto-pretty (curl, …).
+fn stdout_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
