@@ -20,6 +20,7 @@ const ICON_PATH:     &str = "$ ";   // PATH binary
 const ICON_DIR:      &str = "📁 ";  // directory
 const ICON_FILE:     &str = "📄 ";  // file
 const ICON_EXEC:     &str = "▶ ";   // executable file
+const ICON_DOCKER:   &str = "🐳 ";  // docker container/image
 
 #[derive(DeriveHelper)]
 pub struct ShellHelper {
@@ -118,6 +119,19 @@ impl Completer for ShellHelper {
                     display: format!("{}{:<14}  \x1b[2mPATH\x1b[0m", ICON_PATH, p),
                     replacement: p,
                 });
+            }
+        }
+
+        // Completion theo ngữ cảnh lệnh (vd `docker exec <TAB>` → tên container).
+        // Nếu có kết quả thì trả về luôn, không trộn lẫn với danh sách file/thư mục
+        // trong cwd (tránh nhiễu).
+        if !first_word {
+            let dyn_results = dynamic_completions(line, start, frag);
+            if !dyn_results.is_empty() {
+                let mut seen = std::collections::HashSet::new();
+                let mut dr = dyn_results;
+                dr.retain(|p| seen.insert(p.replacement.clone()));
+                return Ok((start, dr));
             }
         }
 
@@ -330,6 +344,160 @@ fn path_complete(frag: &str, cwd: &std::path::Path, filter: PathFilter) -> Vec<P
     out
 }
 
+/// Các từ (đã tách theo whitespace) của segment lệnh hiện tại, TRƯỚC vị trí
+/// `start` — tức là không gồm fragment đang gõ dở. "segment" = phần sau dấu
+/// `| & ; && ||` gần nhất. Dùng để hiểu ngữ cảnh (lệnh gì, subcommand nào, đã
+/// có mấy positional argument).
+fn segment_words(line: &str, start: usize) -> Vec<String> {
+    let before = &line[..start];
+    let bytes = before.as_bytes();
+    let mut anchor = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'|' || c == b'&' || c == b';' {
+            if i + 1 < bytes.len() && bytes[i + 1] == c {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            anchor = i;
+        } else {
+            i += 1;
+        }
+    }
+    before[anchor..].split_whitespace().map(|s| s.to_string()).collect()
+}
+
+/// Completion theo ngữ cảnh lệnh. Trả về rỗng nếu không áp dụng (rơi về path).
+fn dynamic_completions(line: &str, start: usize, frag: &str) -> Vec<Pair> {
+    let words = segment_words(line, start);
+    let Some(cmd) = words.first() else { return Vec::new() };
+    match cmd.as_str() {
+        "docker" | "podman" => docker_completions(cmd, &words, frag),
+        _ => Vec::new(),
+    }
+}
+
+/// `docker <sub> ...` — gợi ý tên container (hoặc image) tuỳ subcommand.
+fn docker_completions(bin: &str, words: &[String], frag: &str) -> Vec<Pair> {
+    // Đang chỉ gõ flag (vd `-it`) thì không gợi ý gì.
+    if frag.starts_with('-') {
+        return Vec::new();
+    }
+    // subcommand = positional đầu tiên sau "docker" (bỏ qua các flag như -D, -H ...).
+    let positionals: Vec<&String> = words
+        .iter()
+        .skip(1)
+        .filter(|w| !w.starts_with('-'))
+        .collect();
+    let Some(sub) = positionals.first().map(|s| s.as_str()) else {
+        // Chưa có subcommand → đang gõ chính subcommand đó.
+        return docker_subcommand_pairs(frag);
+    };
+    // Số positional đã có SAU subcommand (chưa tính fragment đang gõ).
+    let args_after_sub = positionals.len() - 1;
+
+    // Subcommand thao tác trên container đang chạy → `docker ps`.
+    const RUNNING: &[&str] = &[
+        "exec", "attach", "logs", "top", "port", "stats", "pause",
+        "unpause", "kill", "stop", "restart", "wait", "diff",
+    ];
+    // Subcommand thao tác trên mọi container (kể cả đã dừng) → `docker ps -a`.
+    const ALL: &[&str] = &[
+        "start", "rm", "inspect", "rename", "commit", "update", "export", "cp",
+    ];
+    // Subcommand nhận NHIỀU container (lặp lại) → gợi ý cho mọi positional.
+    const MULTI: &[&str] = &[
+        "start", "stop", "restart", "kill", "pause", "unpause", "rm", "wait",
+    ];
+    // Subcommand thao tác trên image → `docker images`.
+    const IMAGES: &[&str] = &["run", "create", "rmi", "save", "tag", "push", "history"];
+
+    let is_multi = MULTI.contains(&sub);
+    // Với subcommand 1-container (exec, logs, ...): chỉ gợi ý ở positional đầu
+    // (container). Với subcommand nhiều container: gợi ý ở mọi positional.
+    let want_container = (RUNNING.contains(&sub) || ALL.contains(&sub))
+        && (is_multi || args_after_sub == 0);
+
+    if want_container {
+        let all = ALL.contains(&sub);
+        let names = docker_container_names(bin, all);
+        return names
+            .into_iter()
+            .filter(|n| n.starts_with(frag))
+            .map(|n| Pair {
+                display: format!("{}{:<24}  \x1b[2mcontainer\x1b[0m", ICON_DOCKER, n),
+                replacement: n,
+            })
+            .collect();
+    }
+
+    // image cho `docker run <TAB>` (positional đầu = image), `rmi`, ...
+    if IMAGES.contains(&sub) && args_after_sub == 0 {
+        let images = docker_image_names(bin);
+        return images
+            .into_iter()
+            .filter(|n| n.starts_with(frag))
+            .map(|n| Pair {
+                display: format!("{}{:<24}  \x1b[2mimage\x1b[0m", ICON_DOCKER, n),
+                replacement: n,
+            })
+            .collect();
+    }
+
+    Vec::new()
+}
+
+fn docker_subcommand_pairs(frag: &str) -> Vec<Pair> {
+    const SUBS: &[&str] = &[
+        "run", "exec", "ps", "build", "pull", "push", "images", "logs",
+        "stop", "start", "restart", "rm", "rmi", "inspect", "attach",
+        "kill", "pause", "unpause", "stats", "top", "port", "cp", "commit",
+        "rename", "network", "volume", "compose", "system", "version", "info",
+    ];
+    SUBS.iter()
+        .filter(|s| s.starts_with(frag))
+        .map(|s| Pair {
+            display: format!("{}{:<16}  \x1b[2mdocker\x1b[0m", ICON_DOCKER, s),
+            replacement: s.to_string(),
+        })
+        .collect()
+}
+
+fn docker_container_names(bin: &str, all: bool) -> Vec<String> {
+    let mut args: Vec<&str> = vec!["ps", "--format", "{{.Names}}"];
+    if all {
+        args.insert(1, "-a");
+    }
+    run_command_lines(bin, &args)
+}
+
+fn docker_image_names(bin: &str) -> Vec<String> {
+    let out = run_command_lines(bin, &["images", "--format", "{{.Repository}}:{{.Tag}}"]);
+    // Bỏ image <none>:<none> (dangling) cho gọn.
+    out.into_iter().filter(|s| !s.contains("<none>")).collect()
+}
+
+/// Chạy lệnh ngoài, trả về các dòng stdout (đã trim, bỏ dòng rỗng).
+/// Trả rỗng nếu lệnh fail / không tồn tại — completion sẽ rơi về path.
+fn run_command_lines(bin: &str, args: &[&str]) -> Vec<String> {
+    std::process::Command::new(bin)
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn path_binaries(prefix: &str, limit: usize) -> Vec<String> {
     if prefix.is_empty() || prefix.contains('/') {
         return Vec::new();
@@ -351,4 +519,51 @@ fn path_binaries(prefix: &str, limit: usize) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_words_basics() {
+        assert_eq!(segment_words("docker exec -it ", 16), vec!["docker", "exec", "-it"]);
+        // sau pipe → segment mới
+        assert_eq!(segment_words("foo | docker exec ", 18), vec!["docker", "exec"]);
+        // fragment đang gõ không được tính (start ở đầu fragment)
+        assert_eq!(segment_words("docker ", 7), vec!["docker"]);
+    }
+
+    #[test]
+    fn docker_suggests_subcommands_while_typing_sub() {
+        let line = "docker ex";
+        let (start, frag) = current_word(line, line.len());
+        let r = dynamic_completions(line, start, frag);
+        assert!(r.iter().any(|p| p.replacement == "exec"),
+            "phải gợi ý subcommand 'exec', nhận: {:?}",
+            r.iter().map(|p| &p.replacement).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn docker_no_suggest_for_flag_fragment() {
+        let line = "docker exec -i";
+        let (start, frag) = current_word(line, line.len());
+        let r = dynamic_completions(line, start, frag);
+        assert!(r.is_empty(), "đang gõ flag thì không gợi ý: {:?}",
+            r.iter().map(|p| &p.replacement).collect::<Vec<_>>());
+    }
+
+    // Chỉ chạy khi máy có docker + container đang chạy.
+    #[test]
+    fn docker_suggests_containers_after_exec() {
+        if run_command_lines("docker", &["ps", "-q"]).is_empty() {
+            eprintln!("skip: không có docker container đang chạy");
+            return;
+        }
+        let line = "docker exec -it ";
+        let (start, frag) = current_word(line, line.len());
+        let r = dynamic_completions(line, start, frag);
+        assert!(!r.is_empty(), "phải gợi ý tên container sau `docker exec -it `");
+        assert!(r.iter().all(|p| p.display.contains("container")));
+    }
 }
