@@ -7,6 +7,24 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.4] — Paste nhiều dòng + docker completion + format curl
+
+### Đã thêm
+
+- **Tab completion cho docker/podman** — `docker exec -it <Tab>` gợi ý container đang chạy (`docker ps`); `start/rm/inspect` gợi ý mọi container kể cả đã dừng (`docker ps -a`); `run/rmi/tag` gợi ý image. Subcommand nhận nhiều container (`stop a b c`) gợi ý ở mọi vị trí. Đang gõ flag (`-it`) thì không gợi ý. Icon `🐳` phân biệt container/image. Docker không cài / không có container → rơi về path completion như cũ.
+- **Auto-format response của `curl`** — chạy `curl` tương tác sẽ thấy đường ngăn cách `── HTTP 200 · application/json · 233 ms ──` tách phần lệnh với phần response (status xanh/vàng/đỏ theo 2xx/3xx/4xx-5xx), body JSON được indent + tô màu (key cyan, string xanh, số vàng, bool/null magenta), giữ nguyên thứ tự field của API. Body không phải JSON in nguyên si. Tự inject `-sS` để tắt progress meter nhưng vẫn hiện lỗi.
+  - Chỉ bật khi stdout là TTY, không pipe / redirect / chạy nền — `curl | jq`, `curl > file`, script/CI vẫn nhận raw output, không vỡ gì.
+
+### Đã sửa
+
+- **Paste nhiều dòng bị gộp thành 1 lệnh** — lexer coi `\n` là whitespace nên paste `cd /tmp` + `ls` chạy thành `cd /tmp ls`. Giờ xuống dòng = dấu phân tách lệnh (như `;`); newline trong nháy đơn/kép vẫn giữ nguyên.
+- **`\` cuối dòng (line continuation)** — lệnh nhiều dòng kiểu `curl ... \` từng vỡ thành rác `\n--header` khiến curl báo "Malformed input to a URL". Giờ `\` + xuống dòng = nối dòng (cả ngoài nháy lẫn trong nháy kép), giống bash.
+- Comment `#` chỉ bỏ qua tới hết dòng — không còn nuốt các dòng phía sau khi paste nhiều dòng.
+- Dòng trống / `;` thừa / `;;` không còn báo lỗi "lệnh trống".
+- Paste nhiều dòng lưu **mỗi dòng thành 1 entry lịch sử riêng** (gọn cho `↑` / `Ctrl-R`) thay vì 1 khối có `\n` ở giữa.
+
+---
+
 ## [v1.0.3] — Tương thích VSCode + markdown render
 
 ### Đã thêm
