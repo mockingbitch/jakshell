@@ -7,6 +7,16 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.5] — `exec` + `VAR=val cmd`: làm login shell cho session đồ hoạ
+
+### Đã thêm
+
+- **Builtin `exec`** — `exec <cmd> [args...]` thay thế tiến trình shell bằng lệnh mới (POSIX `execve`). Bắt buộc để JakShell làm login shell trên desktop Linux: GDM/Xsession khởi động session đồ hoạ qua `$SHELL -c "exec <session>"` — thiếu `exec` thì session chết ngay sau khi xác thực. Redirect áp vào fd trước khi exec nên process mới kế thừa nguyên. `exec` không có args là no-op (shell chạy tiếp, giống bash). Lệnh không tồn tại → exit 127, không chạy được → 126.
+- **Phép gán biến đứng đầu lệnh (bash-style)** — `VAR=val cmd args` set biến môi trường **chỉ cho lệnh đó**: hoạt động với lệnh ngoài, từng lệnh trong pipeline, và cả builtin (builtin chạy xong tự khôi phục giá trị cũ; riêng `exec` thì env đi theo process mới). `VAR=val` đứng một mình → set biến shell. Tên biến phải là identifier hợp lệ (`[A-Za-z_][A-Za-z0-9_]*`) — `ls A=1` thì `A=1` vẫn là argument bình thường, `=foo` / `1AB=x` không bị nhận nhầm.
+  - Hai tính năng kết hợp cho đúng kịch bản GDM thật: `GNOME_SHELL_SESSION_MODE=ubuntu exec gnome-session --session=ubuntu`.
+
+---
+
 ## [v1.0.4] — Paste nhiều dòng + docker completion + format curl
 
 ### Đã thêm
@@ -286,6 +296,8 @@ jak theme list          # chọn giao diện
 
 ---
 
+[v1.0.5]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.5
+[v1.0.4]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.4
 [v1.0.3]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.3
 [v1.0.2]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.2
 [v1.0.1]: https://github.com/mockingbitch/jakshell/releases/tag/v1.0.1
