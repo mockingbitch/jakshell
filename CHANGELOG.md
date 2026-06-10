@@ -7,6 +7,21 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.6] — Tách khối lệnh trong REPL
+
+### Đã thêm
+
+- **Tách khối lệnh trong REPL** — trước mỗi prompt mới (trừ prompt đầu tiên sau banner) in 1 dòng trống để khối lệnh + output trước đó tách biệt hẳn với lệnh tiếp theo, scroll lại lịch sử không còn dính sát nhau. Cấu hình qua section `[ui]` trong `~/.jakshrc.toml`:
+  - `blank_line = true` (mặc định) — dòng trống giữa các khối. `false` = prompt sát nhau như bash/zsh truyền thống.
+  - `separator = "line"` — kẻ thêm đường mờ ngang hết chiều rộng terminal giữa các khối, phân biệt rạch ròi từng lệnh (mặc định `"none"`).
+  - Khoảng cách in ra **trước** khi rustyline vẽ prompt (không nhét `\n` vào prompt template) nên completion / redraw / multi-line không bị ảnh hưởng.
+
+### Tài liệu
+
+- README + `examples/jakshrc.toml`: thêm docs section `[ui]`.
+
+---
+
 ## [v1.0.5] — `exec` + `VAR=val cmd`: làm login shell cho session đồ hoạ
 
 ### Đã thêm
