@@ -42,8 +42,17 @@ fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> 
         // Single command: may be a builtin (must run in our process)
         let cmd = &commands[0];
         let argv = build_argv(shell, cmd);
-        if argv.is_empty() && cmd.redirects.is_empty() {
-            return Ok(0);
+        // Phép gán đứng đầu (`VAR=val cmd`) — bash-style. GDM/Xsession khởi
+        // động session qua login shell bằng dạng này nên bắt buộc phải hỗ trợ.
+        let (assigns, argv) = split_leading_assignments(argv);
+        if argv.is_empty() {
+            // Chỉ có phép gán (`VAR=val`) → set biến shell, không chạy gì.
+            for (k, v) in &assigns {
+                shell.borrow_mut().set_var(k, v);
+            }
+            if cmd.redirects.is_empty() {
+                return Ok(0);
+            }
         }
 
         // Cờ --jak (do JakShell xử lý, không truyền xuống lệnh thật)
@@ -64,7 +73,23 @@ fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> 
 
         if let Some(head) = argv.first() {
             if builtins::is_builtin(head) && !pipeline.background {
-                return builtins::run(shell, &argv, &cmd.redirects);
+                // `VAR=val builtin`: set tạm trong lúc chạy rồi khôi phục
+                // (với `exec` thì không bao giờ quay lại — env đi theo process mới).
+                let saved: Vec<(String, Option<String>)> = assigns
+                    .iter()
+                    .map(|(k, _)| (k.clone(), shell.borrow().get_var(k)))
+                    .collect();
+                for (k, v) in &assigns {
+                    shell.borrow_mut().set_var(k, v);
+                }
+                let result = builtins::run(shell, &argv, &cmd.redirects);
+                for (k, old) in saved {
+                    match old {
+                        Some(v) => shell.borrow_mut().set_var(&k, &v),
+                        None => shell.borrow_mut().unset_var(&k),
+                    }
+                }
+                return result;
             }
         }
         return spawn_external(shell, cmd, pipeline.background);
@@ -172,6 +197,7 @@ fn apply_redirects(builder: &mut Command, shell: &Rc<RefCell<Shell>>, redirects:
 
 fn spawn_external(shell: &Rc<RefCell<Shell>>, cmd: &SimpleCommand, background: bool) -> Result<i32> {
     let argv = build_argv(shell, cmd);
+    let (assigns, argv) = split_leading_assignments(argv);
     if argv.is_empty() {
         return Ok(0);
     }
@@ -185,6 +211,7 @@ fn spawn_external(shell: &Rc<RefCell<Shell>>, cmd: &SimpleCommand, background: b
 
     let mut builder = Command::new(prog);
     builder.args(args);
+    builder.envs(assigns);
     builder.current_dir(&shell.borrow().cwd);
 
     apply_redirects(&mut builder, shell, &cmd.redirects)?;
@@ -230,6 +257,7 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
 
     for (i, cmd) in commands.iter().enumerate() {
         let argv = build_argv(shell, cmd);
+        let (assigns, argv) = split_leading_assignments(argv);
         if argv.is_empty() {
             return Err(anyhow!("lệnh rỗng trong pipeline"));
         }
@@ -243,6 +271,7 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
         // as external commands anyway on macOS/Linux.
         let mut builder = Command::new(prog);
         builder.args(args);
+        builder.envs(assigns);
         builder.current_dir(&shell.borrow().cwd);
 
         if let Some(stdin) = prev_stdout.take() {
@@ -295,4 +324,74 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
 /// stdout có phải terminal không — quyết định có bật auto-pretty (curl, …).
 fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+/// Tách các phép gán `VAR=val` đứng đầu lệnh (bash-style):
+/// `A=1 B=2 cmd args` → ([("A","1"),("B","2")], ["cmd","args"]).
+/// Dừng peel ở word đầu tiên không phải dạng gán hợp lệ.
+fn split_leading_assignments(argv: Vec<String>) -> (Vec<(String, String)>, Vec<String>) {
+    let mut assigns = Vec::new();
+    let mut rest = Vec::new();
+    let mut done = false;
+    for w in argv {
+        if !done {
+            if let Some(kv) = parse_assignment(&w) {
+                assigns.push(kv);
+                continue;
+            }
+            done = true;
+        }
+        rest.push(w);
+    }
+    (assigns, rest)
+}
+
+/// `NAME=value` với NAME là identifier hợp lệ ([A-Za-z_][A-Za-z0-9_]*).
+fn parse_assignment(w: &str) -> Option<(String, String)> {
+    let eq = w.find('=')?;
+    if eq == 0 {
+        return None;
+    }
+    let name = &w[..eq];
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some((name.to_string(), w[eq + 1..].to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assignments_are_peeled() {
+        let (a, rest) = split_leading_assignments(vec![
+            "GNOME_SHELL_SESSION_MODE=ubuntu".into(),
+            "exec".into(),
+            "gnome-session".into(),
+        ]);
+        assert_eq!(a, vec![("GNOME_SHELL_SESSION_MODE".to_string(), "ubuntu".to_string())]);
+        assert_eq!(rest, vec!["exec", "gnome-session"]);
+    }
+
+    #[test]
+    fn non_assignment_stops_peeling() {
+        // `ls A=1` — A=1 là argument, không phải phép gán
+        let (a, rest) = split_leading_assignments(vec!["ls".into(), "A=1".into()]);
+        assert!(a.is_empty());
+        assert_eq!(rest, vec!["ls", "A=1"]);
+    }
+
+    #[test]
+    fn invalid_names_are_not_assignments() {
+        assert!(parse_assignment("=foo").is_none());
+        assert!(parse_assignment("1AB=x").is_none());
+        assert!(parse_assignment("A-B=x").is_none());
+        assert_eq!(parse_assignment("_OK=1"), Some(("_OK".into(), "1".into())));
+    }
 }

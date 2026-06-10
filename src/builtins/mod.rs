@@ -9,7 +9,7 @@ use crate::shell::Shell;
 pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
-    "help", "?", "which", "true", "false", "explain", "bookmark",
+    "help", "?", "which", "true", "false", "explain", "bookmark", "exec",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -43,6 +43,7 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "set" => Ok(0),
         "explain" => crate::explain::run(shell, &argv[1..].to_vec()),
         "bookmark" => crate::bookmark::run(shell, argv),
+        "exec" => exec_replace(shell, &args),
         _ => Err(anyhow!("builtin chưa hỗ trợ: {}", cmd)),
     };
     flush_std();
@@ -404,4 +405,29 @@ fn which(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
         }
     }
     Ok(code)
+}
+
+/// `exec <cmd> [args...]` — thay thế tiến trình shell bằng <cmd> (POSIX).
+/// BẮT BUỘC cho login shell: GDM/Xsession khởi động session qua
+/// `$SHELL -c "exec <session>..."` — thiếu nó session chết ngay sau xác thực.
+/// Redirect đã được RedirectGuard áp vào fd trước khi gọi — process mới kế
+/// thừa nguyên (và không bao giờ restore vì exec không quay lại).
+/// `exec` không args: no-op (bash giữ shell chạy tiếp).
+fn exec_replace(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    if args.is_empty() {
+        return Ok(0);
+    }
+    use std::os::unix::process::CommandExt;
+    let mut c = std::process::Command::new(args[0]);
+    c.args(&args[1..]);
+    c.current_dir(&shell.borrow().cwd);
+    // exec() chỉ trả về khi THẤT BẠI — thành công thì process này biến mất.
+    let err = c.exec();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        eprintln!("jaksh: exec: {}: {}", crate::i18n::t("common.not_found"), args[0]);
+        Ok(127)
+    } else {
+        eprintln!("jaksh: exec: không chạy được {}: {}", args[0], err);
+        Ok(126)
+    }
 }
