@@ -69,7 +69,16 @@ impl<'a> Parser<'a> {
         // The first pipeline's "op" describes how it connects to the previous one.
         // Since there's no previous, we mark it as Always.
         let mut next_op = SeqOp::Always;
-        while self.peek().is_some() {
+        loop {
+            // Bỏ qua các dấu `;` thừa (dòng trống khi paste nhiều dòng, `;`
+            // đầu/cuối, `;;`). Mỗi cái reset op về Always.
+            while matches!(self.peek(), Some(Token::Semicolon)) {
+                self.advance();
+                next_op = SeqOp::Always;
+            }
+            if self.peek().is_none() {
+                break;
+            }
             let pipeline = self.parse_pipeline()?;
             items.push((pipeline, next_op));
             match self.peek() {

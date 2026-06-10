@@ -31,13 +31,25 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
 
     while i < bytes.len() {
         let c = bytes[i];
+        // Xuống dòng = dấu phân tách lệnh (như `;`). Quan trọng khi user paste
+        // nhiều dòng cùng lúc: mỗi dòng là 1 lệnh riêng, không bị gộp làm một.
+        // Newline NẰM TRONG nháy đơn/kép vẫn giữ nguyên (xử lý ở read_word).
+        if c == '\n' || c == '\r' {
+            tokens.push(Token::Semicolon);
+            i += 1;
+            continue;
+        }
         if c.is_whitespace() {
             i += 1;
             continue;
         }
         if c == '#' {
-            // comment to end of line
-            break;
+            // comment: bỏ qua tới hết dòng (không kết thúc toàn bộ input —
+            // các dòng sau khi paste nhiều dòng vẫn phải được xử lý).
+            while i < bytes.len() && bytes[i] != '\n' && bytes[i] != '\r' {
+                i += 1;
+            }
+            continue;
         }
         // Operators
         match c {
@@ -163,6 +175,15 @@ fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
                 let ch = bytes[i];
                 if ch == '\\' && i + 1 < bytes.len() {
                     let n = bytes[i + 1];
+                    // Nối dòng trong nháy kép: `\` trước xuống dòng → bỏ cả hai.
+                    if n == '\n' {
+                        i += 2;
+                        continue;
+                    }
+                    if n == '\r' {
+                        i += if bytes.get(i + 2) == Some(&'\n') { 3 } else { 2 };
+                        continue;
+                    }
                     if matches!(n, '"' | '\\' | '$' | '`') {
                         qbuf.push(n);
                         i += 2;
@@ -192,7 +213,18 @@ fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
         }
 
         if c == '\\' && i + 1 < bytes.len() {
-            buf.push(bytes[i + 1]);
+            let n = bytes[i + 1];
+            // `\` ngay trước xuống dòng = nối dòng (line continuation): bỏ cả
+            // hai. Quan trọng khi paste lệnh nhiều dòng dạng `curl ... \`.
+            if n == '\n' {
+                i += 2;
+                continue;
+            }
+            if n == '\r' {
+                i += if bytes.get(i + 2) == Some(&'\n') { 3 } else { 2 };
+                continue;
+            }
+            buf.push(n);
             i += 2;
             continue;
         }
@@ -247,4 +279,74 @@ fn read_var(bytes: &[char], start: usize) -> (String, usize) {
         }
     }
     (name, i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(input: &str) -> Vec<String> {
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .filter_map(|t| match t {
+                Token::Word(parts) => Some(
+                    parts
+                        .iter()
+                        .map(|p| match p {
+                            WordPart::Literal(s) | WordPart::Quoted(s) => s.clone(),
+                            WordPart::Var(s) => format!("${}", s),
+                            WordPart::Tilde => "~".to_string(),
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_separators(input: &str) -> usize {
+        tokenize(input)
+            .unwrap()
+            .iter()
+            .filter(|t| matches!(t, Token::Semicolon))
+            .count()
+    }
+
+    #[test]
+    fn newline_is_command_separator() {
+        // hai dòng → 1 dấu phân tách ở giữa
+        assert_eq!(count_separators("echo a\necho b"), 1);
+    }
+
+    #[test]
+    fn backslash_newline_is_line_continuation() {
+        // `\` cuối dòng nối dòng: KHÔNG có dấu phân tách, các word nối liền mạch
+        let w = words("curl --location 'https://x/v' \\\n--header 'Content-Type: application/json'");
+        assert_eq!(
+            w,
+            vec![
+                "curl",
+                "--location",
+                "https://x/v",
+                "--header",
+                "Content-Type: application/json",
+            ]
+        );
+        assert_eq!(count_separators("foo \\\nbar"), 0, "nối dòng không tạo separator");
+    }
+
+    #[test]
+    fn single_quote_preserves_newlines() {
+        // JSON nhiều dòng trong nháy đơn giữ nguyên xuống dòng
+        let w = words("--data '{\n  \"a\": 1\n}'");
+        assert_eq!(w, vec!["--data", "{\n  \"a\": 1\n}"]);
+    }
+
+    #[test]
+    fn comment_only_to_end_of_line() {
+        // comment ở dòng 1 không nuốt dòng 2
+        let w = words("echo a # ghi chú\necho b");
+        assert_eq!(w, vec!["echo", "a", "echo", "b"]);
+    }
 }

@@ -93,7 +93,17 @@ fn main() -> Result<()> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                rl.add_history_entry(line.as_str()).ok();
+                // Khi paste nhiều dòng, lưu mỗi dòng thành 1 entry lịch sử riêng
+                // (gọn cho ↑ / Ctrl-R) thay vì 1 khối có \n ở giữa.
+                if line.contains('\n') {
+                    for l in line.split('\n') {
+                        if !l.trim().is_empty() {
+                            rl.add_history_entry(l).ok();
+                        }
+                    }
+                } else {
+                    rl.add_history_entry(line.as_str()).ok();
+                }
 
                 let started = Instant::now();
                 let result = run_line(&shell, &line);
