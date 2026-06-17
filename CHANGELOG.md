@@ -7,6 +7,19 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.7] — Sửa `history` không hiện lệnh của phiên hiện tại
+
+### Đã sửa
+
+- **`history` chỉ hiện lịch sử cũ, không thấy lệnh vừa gõ** — builtin `history` đọc thẳng file `~/.config/jaksh/history`, nhưng rustyline chỉ ghi file này khi thoát shell sạch (Ctrl-D). Trong lúc phiên đang chạy, lệnh vừa gõ chỉ nằm trong bộ nhớ nên `history` luôn in lại ảnh chụp của **lần thoát trước** — không bao giờ thấy lệnh mới. Kèm theo, dòng `#V2` (header định dạng file của rustyline) bị in nhầm thành "lệnh số 1", và entry nhiều dòng hiện ra `\n` đã escape.
+  - Giờ `history` đọc từ lịch sử trong bộ nhớ của phiên (nạp từ file lúc khởi động **+** mọi lệnh vừa gõ), cập nhật theo thời gian thực, đã giải mã `#V2` / `\n`. Đồng bộ đúng quy tắc bỏ trùng liên tiếp + bỏ dòng mở đầu bằng dấu cách với `↑` / `Ctrl-R`.
+
+### Đã thêm
+
+- **Lưu lịch sử tăng dần (append từng lệnh)** — mỗi lệnh được ghi ngay ra file thay vì chỉ lúc thoát, nên lịch sử sống sót cả khi shell bị `kill` hoặc terminal đóng đột ngột, không chỉ khi thoát bằng Ctrl-D. Không ghi trùng: `append` chỉ thêm entry mới, nên `save` lúc thoát thành no-op.
+
+---
+
 ## [v1.0.6] — Tách khối lệnh trong REPL
 
 ### Đã thêm
