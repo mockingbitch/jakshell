@@ -10,6 +10,11 @@ pub struct Shell {
     pub cwd: PathBuf,
     pub theme: Theme,
     pub jobs: Vec<Job>,
+    /// Bản sao vòng lịch sử của rustyline (đã nạp từ file + lệnh vừa gõ, đã
+    /// bỏ trùng liên tiếp + giới hạn kích thước). Là nguồn dữ liệu cho builtin
+    /// `history` — cập nhật theo thời gian thực, KHÔNG đọc lại file (file chỉ
+    /// được ghi khi thoát/append) nên không còn hiện ảnh chụp cũ.
+    pub history: Vec<String>,
     last_status: i32,
     config_dir: PathBuf,
     pub prompt_template: String,
@@ -119,6 +124,7 @@ impl Shell {
             cwd,
             theme: Theme::default(),
             jobs: Vec::new(),
+            history: Vec::new(),
             last_status: 0,
             config_dir,
             prompt_template: default_prompt_template(),

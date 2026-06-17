@@ -256,9 +256,11 @@ fn source(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
 }
 
 fn history(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
-    let path = shell.borrow().history_path();
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    for (i, line) in content.lines().enumerate() {
+    // Đọc từ lịch sử trong bộ nhớ của phiên (cập nhật theo thời gian thực),
+    // KHÔNG đọc file: file chỉ phản ánh lần thoát trước nên sẽ cũ, và còn ở
+    // định dạng `#V2` (có header + escape `\n`) không hợp để in trực tiếp.
+    let sh = shell.borrow();
+    for (i, line) in sh.history.iter().enumerate() {
         println!("{:5}  {}", i + 1, line);
     }
     Ok(0)

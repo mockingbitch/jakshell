@@ -110,6 +110,23 @@ fn main() -> Result<()> {
                 } else {
                     rl.add_history_entry(line.as_str()).ok();
                 }
+                // Lưu tăng dần ra đĩa: lịch sử sống sót cả khi shell bị kill chứ
+                // không chỉ khi thoát sạch. append chỉ ghi entry mới (no-op rẻ
+                // khi không có gì mới) nên save lúc thoát cũng thành no-op, không
+                // ghi trùng.
+                let _ = rl.append_history(&history_path);
+                // Đồng bộ shell.history = bản sao CHÍNH XÁC vòng lịch sử của
+                // rustyline (đã nạp từ file + bỏ trùng liên tiếp + giới hạn kích
+                // thước) — builtin `history` nhờ đó luôn khớp với ↑ / Ctrl-R và
+                // file trên đĩa, không phình vô hạn rồi lệch khỏi những gì thực sự
+                // gọi lại được sau >100 lệnh.
+                {
+                    let mut sh = shell.borrow_mut();
+                    sh.history.clear();
+                    for entry in rl.history().iter() {
+                        sh.history.push(entry.clone());
+                    }
+                }
 
                 let started = Instant::now();
                 let result = run_line(&shell, &line);
