@@ -21,6 +21,10 @@ const ICON_DIR:      &str = "📁 ";  // directory
 const ICON_FILE:     &str = "📄 ";  // file
 const ICON_EXEC:     &str = "▶ ";   // executable file
 const ICON_DOCKER:   &str = "🐳 ";  // docker container/image
+const ICON_GIT:        &str = "🔀 ";  // git subcommand
+const ICON_GIT_BRANCH: &str = "⎇ ";   // git branch (local or remote-tracking)
+const ICON_GIT_REMOTE: &str = "☁ ";   // git remote name
+const ICON_GIT_TAG:    &str = "🏷 ";  // git tag
 
 #[derive(DeriveHelper)]
 pub struct ShellHelper {
@@ -38,6 +42,7 @@ impl Completer for ShellHelper {
     fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
         let (start, frag) = current_word(line, pos);
         let first_word = is_first_word(line, start);
+        let cwd = self.shell.borrow().cwd.clone();
         let mut results = Vec::new();
 
         if first_word {
@@ -126,7 +131,7 @@ impl Completer for ShellHelper {
         // Nếu có kết quả thì trả về luôn, không trộn lẫn với danh sách file/thư mục
         // trong cwd (tránh nhiễu).
         if !first_word {
-            let dyn_results = dynamic_completions(line, start, frag);
+            let dyn_results = dynamic_completions(line, start, frag, &cwd);
             if !dyn_results.is_empty() {
                 let mut seen = std::collections::HashSet::new();
                 let mut dr = dyn_results;
@@ -138,7 +143,7 @@ impl Completer for ShellHelper {
         // Path completion — context-aware theo TÊN LỆNH đang gõ.
         let cmd = command_name(line, start);
         let filter = path_filter_for(&cmd);
-        let path_results = path_complete(frag, &self.shell.borrow().cwd, filter);
+        let path_results = path_complete(frag, &cwd, filter);
         results.extend(path_results);
 
         // Deduplicate by replacement
@@ -370,11 +375,12 @@ fn segment_words(line: &str, start: usize) -> Vec<String> {
 }
 
 /// Completion theo ngữ cảnh lệnh. Trả về rỗng nếu không áp dụng (rơi về path).
-fn dynamic_completions(line: &str, start: usize, frag: &str) -> Vec<Pair> {
+fn dynamic_completions(line: &str, start: usize, frag: &str, cwd: &std::path::Path) -> Vec<Pair> {
     let words = segment_words(line, start);
     let Some(cmd) = words.first() else { return Vec::new() };
     match cmd.as_str() {
         "docker" | "podman" => docker_completions(cmd, &words, frag),
+        "git" => git_completions(&words, frag, cwd),
         _ => Vec::new(),
     }
 }
@@ -479,6 +485,281 @@ fn docker_image_names(bin: &str) -> Vec<String> {
     out.into_iter().filter(|s| !s.contains("<none>")).collect()
 }
 
+// ───────────────────────────── git ──────────────────────────────
+// `git <sub> ...` — gợi ý branch / remote / tag tuỳ subcommand.
+// Ví dụ: `git push feat/<TAB>` → các branch bắt đầu bằng `feat/`.
+
+/// Global option của git nhận 1 giá trị → cần bỏ qua cả token kế tiếp khi đi
+/// tìm subcommand (vd `git -C /path status`).
+const GIT_VALUE_GLOBALS: &[&str] = &[
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+];
+
+/// Flag tạo branch MỚI cho `switch`/`checkout` — sau nó user gõ TÊN MỚI nên
+/// không gợi ý branch đang có.
+const GIT_NEW_BRANCH_FLAGS: &[&str] = &["-c", "-C", "-b", "-B"];
+
+fn git_completions(words: &[String], frag: &str, cwd: &std::path::Path) -> Vec<Pair> {
+    // Đang gõ flag (`-`, `--`) → không gợi ý ref (rơi về path/no-op).
+    if frag.starts_with('-') {
+        return Vec::new();
+    }
+
+    // Tìm subcommand: positional đầu sau "git", bỏ qua global flag (và giá trị
+    // của các global nhận tham số).
+    let mut idx = 1;
+    let mut sub: Option<&str> = None;
+    let mut sub_idx = 0usize;
+    while idx < words.len() {
+        let w = words[idx].as_str();
+        if GIT_VALUE_GLOBALS.contains(&w) {
+            idx += 2; // bỏ qua cả flag lẫn giá trị
+            continue;
+        }
+        if w.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        sub = Some(w);
+        sub_idx = idx;
+        break;
+    }
+
+    // Chưa có subcommand → đang gõ chính subcommand đó.
+    let Some(sub) = sub else {
+        return git_subcommand_pairs(frag, cwd);
+    };
+
+    let after = &words[sub_idx + 1..];
+    // Sau `--` mọi thứ là pathspec → để path completion xử lý file.
+    if after.iter().any(|w| w == "--") {
+        return Vec::new();
+    }
+    // Token ngay trước fragment (để bắt `switch -c <tên mới>`).
+    let prev = words.last().map(|s| s.as_str()).unwrap_or("");
+    // Positional đã gõ SAU subcommand (chưa tính fragment đang gõ).
+    let post: Vec<&str> = after.iter().map(|s| s.as_str()).filter(|w| !w.starts_with('-')).collect();
+    let nargs = post.len();
+
+    match sub {
+        // Thao tác trên file → để path completion gợi ý file, không chen ref vào.
+        "add" | "rm" | "mv" | "restore" | "stage" | "clean" | "apply" => Vec::new(),
+
+        // Chuyển/đổi branch: branch local + remote-tracking + tag (DWIM).
+        "checkout" | "switch" => {
+            if GIT_NEW_BRANCH_FLAGS.contains(&prev) {
+                return Vec::new(); // đang đặt tên branch mới
+            }
+            let mut out = ref_pairs(git_local_branches(cwd), frag, ICON_GIT_BRANCH, "branch");
+            out.extend(ref_pairs(git_remote_branches(cwd), frag, ICON_GIT_BRANCH, "remote branch"));
+            out.extend(ref_pairs(git_tags(cwd), frag, ICON_GIT_TAG, "tag"));
+            out
+        }
+
+        // `git branch -d/-m/--merged ...` → branch local; thêm remote nếu có -r/-a.
+        "branch" => {
+            let mut out = ref_pairs(git_local_branches(cwd), frag, ICON_GIT_BRANCH, "branch");
+            if has_flag(words, "-r") || has_flag(words, "--remotes")
+                || has_flag(words, "-a") || has_flag(words, "--all")
+            {
+                out.extend(ref_pairs(git_remote_branches(cwd), frag, ICON_GIT_BRANCH, "remote branch"));
+            }
+            out
+        }
+
+        // Lệnh nhận ref bất kỳ (branch / remote-tracking / tag).
+        "merge" | "rebase" | "cherry-pick" | "revert" | "reset" | "log" | "diff"
+        | "show" | "describe" => {
+            let mut out = ref_pairs(git_local_branches(cwd), frag, ICON_GIT_BRANCH, "branch");
+            out.extend(ref_pairs(git_remote_branches(cwd), frag, ICON_GIT_BRANCH, "remote branch"));
+            out.extend(ref_pairs(git_tags(cwd), frag, ICON_GIT_TAG, "tag"));
+            out
+        }
+
+        // `git push <remote> <branch>`: positional đầu là remote, sau đó là branch.
+        // Gõ `feat/` sẽ chỉ khớp branch (remote như `origin` không khớp) — đúng ý
+        // user: `git push feat/<TAB>` → các branch `feat/...`.
+        "push" => {
+            if nargs == 0 {
+                let mut out = ref_pairs(git_remotes(cwd), frag, ICON_GIT_REMOTE, "remote");
+                out.extend(ref_pairs(git_local_branches(cwd), frag, ICON_GIT_BRANCH, "branch"));
+                out
+            } else {
+                ref_pairs(git_local_branches(cwd), frag, ICON_GIT_BRANCH, "branch")
+            }
+        }
+
+        // `git pull/fetch <remote> <branch>`: remote ở positional đầu; positional
+        // sau là branch PHÍA REMOTE (đã bỏ tiền tố `<remote>/`).
+        "pull" | "fetch" => {
+            if nargs == 0 {
+                ref_pairs(git_remotes(cwd), frag, ICON_GIT_REMOTE, "remote")
+            } else {
+                let remote_prefix = format!("{}/", post[0]);
+                let mut names: Vec<String> = git_remote_branches(cwd)
+                    .into_iter()
+                    .filter_map(|b| b.strip_prefix(&remote_prefix).map(|s| s.to_string()))
+                    .collect();
+                if names.is_empty() {
+                    names = git_local_branches(cwd); // fallback nếu remote chưa có nhánh nào khớp
+                }
+                ref_pairs(names, frag, ICON_GIT_BRANCH, "branch")
+            }
+        }
+
+        // `git remote <sub> [name]`.
+        "remote" => {
+            if nargs == 0 {
+                static_pairs(
+                    &["add", "remove", "rename", "set-url", "get-url", "set-head",
+                      "set-branches", "show", "prune", "update"],
+                    frag, ICON_GIT, "remote cmd",
+                )
+            } else if matches!(post[0],
+                "remove" | "rename" | "set-url" | "get-url" | "set-head" | "set-branches" | "show" | "prune")
+            {
+                ref_pairs(git_remotes(cwd), frag, ICON_GIT_REMOTE, "remote")
+            } else {
+                Vec::new()
+            }
+        }
+
+        // `git stash <sub>`.
+        "stash" => {
+            if nargs == 0 {
+                static_pairs(
+                    &["list", "show", "pop", "apply", "drop", "push", "branch",
+                      "clear", "create", "store"],
+                    frag, ICON_GIT, "stash cmd",
+                )
+            } else {
+                Vec::new()
+            }
+        }
+
+        // `git worktree <sub>`.
+        "worktree" => {
+            if nargs == 0 {
+                static_pairs(
+                    &["add", "list", "lock", "unlock", "move", "prune", "remove", "repair"],
+                    frag, ICON_GIT, "worktree cmd",
+                )
+            } else {
+                Vec::new()
+            }
+        }
+
+        // `git tag [-d] <tag>`.
+        "tag" => ref_pairs(git_tags(cwd), frag, ICON_GIT_TAG, "tag"),
+
+        // Subcommand khác → không gợi ý đặc thù (rơi về path).
+        _ => Vec::new(),
+    }
+}
+
+/// Gợi ý tên subcommand của git: danh sách phổ biến + alias do user định nghĩa
+/// trong `git config`.
+fn git_subcommand_pairs(frag: &str, cwd: &std::path::Path) -> Vec<Pair> {
+    const SUBS: &[&str] = &[
+        "status", "add", "commit", "push", "pull", "fetch", "clone", "init",
+        "branch", "checkout", "switch", "merge", "rebase", "log", "diff", "show",
+        "stash", "tag", "remote", "reset", "revert", "restore", "cherry-pick",
+        "mv", "rm", "clean", "config", "reflog", "blame", "bisect", "worktree",
+        "describe", "shortlog", "apply", "format-patch", "am", "submodule",
+        "sparse-checkout", "gc", "fsck",
+    ];
+    let mut out: Vec<Pair> = SUBS
+        .iter()
+        .filter(|s| s.starts_with(frag))
+        .map(|s| Pair {
+            display: format!("{}{:<16}  \x1b[2mgit\x1b[0m", ICON_GIT, s),
+            replacement: s.to_string(),
+        })
+        .collect();
+    // Alias người dùng: `git config --get-regexp ^alias.` → `alias.co checkout`.
+    for line in run_git_lines(cwd, &["config", "--get-regexp", "^alias\\."]) {
+        if let Some(name) = line.split_whitespace().next().and_then(|k| k.strip_prefix("alias.")) {
+            if name.starts_with(frag) {
+                out.push(Pair {
+                    display: format!("{}{:<16}  \x1b[2mgit alias\x1b[0m", ICON_GIT, name),
+                    replacement: name.to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn has_flag(words: &[String], flag: &str) -> bool {
+    words.iter().any(|w| w == flag)
+}
+
+/// Dựng Pair từ danh sách ref/remote, lọc theo prefix `frag`.
+fn ref_pairs(names: Vec<String>, frag: &str, icon: &str, label: &str) -> Vec<Pair> {
+    names
+        .into_iter()
+        .filter(|n| n.starts_with(frag))
+        .map(|n| Pair {
+            display: format!("{}{:<28}  \x1b[2m{}\x1b[0m", icon, n, label),
+            replacement: n,
+        })
+        .collect()
+}
+
+/// Dựng Pair từ danh sách subcommand tĩnh, lọc theo prefix `frag`.
+fn static_pairs(items: &[&str], frag: &str, icon: &str, label: &str) -> Vec<Pair> {
+    items
+        .iter()
+        .filter(|s| s.starts_with(frag))
+        .map(|s| Pair {
+            display: format!("{}{:<16}  \x1b[2m{}\x1b[0m", icon, s, label),
+            replacement: s.to_string(),
+        })
+        .collect()
+}
+
+fn git_local_branches(cwd: &std::path::Path) -> Vec<String> {
+    run_git_lines(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+}
+
+fn git_remote_branches(cwd: &std::path::Path) -> Vec<String> {
+    run_git_lines(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/remotes"])
+        .into_iter()
+        // Bỏ con trỏ HEAD của remote: `refs/remotes/origin/HEAD` được rút gọn
+        // thành đúng `origin` (KHÔNG phải `origin/HEAD`), nên vừa loại tên
+        // remote trần (không có `/`) vừa loại mọi `*/HEAD` cho chắc.
+        .filter(|s| s.contains('/') && !s.ends_with("/HEAD"))
+        .collect()
+}
+
+fn git_tags(cwd: &std::path::Path) -> Vec<String> {
+    run_git_lines(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/tags"])
+}
+
+fn git_remotes(cwd: &std::path::Path) -> Vec<String> {
+    run_git_lines(cwd, &["remote"])
+}
+
+/// Như `run_command_lines` nhưng chạy `git` trong thư mục `cwd` của shell
+/// (process cwd thường đã đồng bộ, nhưng truyền tường minh cho chắc + dễ test).
+fn run_git_lines(cwd: &std::path::Path, args: &[&str]) -> Vec<String> {
+    std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Chạy lệnh ngoài, trả về các dòng stdout (đã trim, bỏ dòng rỗng).
 /// Trả rỗng nếu lệnh fail / không tồn tại — completion sẽ rơi về path.
 fn run_command_lines(bin: &str, args: &[&str]) -> Vec<String> {
@@ -538,7 +819,7 @@ mod tests {
     fn docker_suggests_subcommands_while_typing_sub() {
         let line = "docker ex";
         let (start, frag) = current_word(line, line.len());
-        let r = dynamic_completions(line, start, frag);
+        let r = dynamic_completions(line, start, frag, std::path::Path::new("."));
         assert!(r.iter().any(|p| p.replacement == "exec"),
             "phải gợi ý subcommand 'exec', nhận: {:?}",
             r.iter().map(|p| &p.replacement).collect::<Vec<_>>());
@@ -548,7 +829,7 @@ mod tests {
     fn docker_no_suggest_for_flag_fragment() {
         let line = "docker exec -i";
         let (start, frag) = current_word(line, line.len());
-        let r = dynamic_completions(line, start, frag);
+        let r = dynamic_completions(line, start, frag, std::path::Path::new("."));
         assert!(r.is_empty(), "đang gõ flag thì không gợi ý: {:?}",
             r.iter().map(|p| &p.replacement).collect::<Vec<_>>());
     }
@@ -562,8 +843,173 @@ mod tests {
         }
         let line = "docker exec -it ";
         let (start, frag) = current_word(line, line.len());
-        let r = dynamic_completions(line, start, frag);
+        let r = dynamic_completions(line, start, frag, std::path::Path::new("."));
         assert!(!r.is_empty(), "phải gợi ý tên container sau `docker exec -it `");
         assert!(r.iter().all(|p| p.display.contains("container")));
+    }
+
+    // ───────────────────────── git completion ─────────────────────────
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Tạo repo tạm với nhánh `main` + vài nhánh `feat/*`, `bugfix/*`, 1 tag.
+    fn setup_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jaksh-gittest-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                // Cô lập khỏi config global/system của máy chạy test.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        run(&["branch", "feat/create-api-list"]);
+        run(&["branch", "feat/login"]);
+        run(&["branch", "bugfix/typo"]);
+        run(&["tag", "v1.0.0"]);
+        dir
+    }
+
+    fn complete_git(line: &str, cwd: &std::path::Path) -> Vec<String> {
+        let (start, frag) = current_word(line, line.len());
+        git_completions(&segment_words(line, start), frag, cwd)
+            .into_iter()
+            .map(|p| p.replacement)
+            .collect()
+    }
+
+    #[test]
+    fn git_push_prefix_suggests_matching_branches() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("push-prefix");
+        // Kịch bản chính của user: `git push feat/<TAB>`.
+        let r = complete_git("git push feat/", &dir);
+        assert!(r.iter().any(|n| n == "feat/create-api-list"), "got {:?}", r);
+        assert!(r.iter().any(|n| n == "feat/login"), "got {:?}", r);
+        assert!(!r.iter().any(|n| n == "bugfix/typo"), "prefix filter hỏng: {:?}", r);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_switch_lists_all_local_branches() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("switch-all");
+        let r = complete_git("git switch ", &dir);
+        for b in ["main", "feat/create-api-list", "feat/login", "bugfix/typo"] {
+            assert!(r.iter().any(|n| n == b), "thiếu branch {}: {:?}", b, r);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_switch_new_branch_flag_suppresses_suggestions() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("switch-c");
+        // `git switch -c <tên mới>` → không gợi ý branch đang có.
+        assert!(complete_git("git switch -c ", &dir).is_empty());
+        assert!(complete_git("git checkout -b ", &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_push_second_positional_is_branch_not_remote() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("push-refspec");
+        let r = complete_git("git push origin feat/", &dir);
+        assert!(r.iter().any(|n| n == "feat/login"), "got {:?}", r);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_double_dash_falls_back_to_path() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("dashdash");
+        // Sau `--` là pathspec → git_completions trả rỗng (path completion lo).
+        assert!(complete_git("git checkout -- f", &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_tag_lists_tags() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("tags");
+        let r = complete_git("git tag -d v", &dir);
+        assert!(r.iter().any(|n| n == "v1.0.0"), "got {:?}", r);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_remote_branches_excludes_phantom_origin_head() {
+        if !git_available() { eprintln!("skip: không có git"); return; }
+        let dir = setup_repo("remote-head");
+        // Dựng remote-tracking ref + con trỏ origin/HEAD (như sau khi clone).
+        let head = String::from_utf8_lossy(
+            &std::process::Command::new("git").current_dir(&dir)
+                .args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+        ).trim().to_string();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(&dir).args(args)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .status().unwrap();
+        };
+        run(&["update-ref", "refs/remotes/origin/main", &head]);
+        run(&["update-ref", "refs/remotes/origin/feat/remote-only", &head]);
+        run(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+
+        let branches = git_remote_branches(&dir);
+        assert!(branches.iter().any(|b| b == "origin/main"), "got {:?}", branches);
+        assert!(branches.iter().any(|b| b == "origin/feat/remote-only"), "got {:?}", branches);
+        // Bug đã sửa: `refs/remotes/origin/HEAD` rút gọn thành `origin` — KHÔNG
+        // được lọt vào danh sách "remote branch".
+        assert!(!branches.iter().any(|b| b == "origin"), "phantom 'origin' leaked: {:?}", branches);
+        assert!(!branches.iter().any(|b| b.ends_with("/HEAD")), "got {:?}", branches);
+
+        // Và qua completion: `git checkout <TAB>` không gợi ý `origin` trần.
+        let r = complete_git("git checkout ", &dir);
+        assert!(!r.iter().any(|n| n == "origin"), "checkout gợi ý 'origin': {:?}", r);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_suggests_subcommands_by_prefix() {
+        // Danh sách tĩnh — không cần repo.
+        let r = complete_git("git pus", std::path::Path::new("."));
+        assert!(r.iter().any(|n| n == "push"), "got {:?}", r);
+        let r2 = complete_git("git ", std::path::Path::new("."));
+        assert!(r2.iter().any(|n| n == "status"), "got {:?}", r2);
+    }
+
+    #[test]
+    fn git_remote_subcommands() {
+        let r = complete_git("git remote ", std::path::Path::new("."));
+        assert!(r.iter().any(|n| n == "add"), "got {:?}", r);
+        assert!(r.iter().any(|n| n == "remove"), "got {:?}", r);
+    }
+
+    #[test]
+    fn git_flag_fragment_no_suggestions() {
+        let dir_dot = std::path::Path::new(".");
+        assert!(complete_git("git push -", dir_dot).is_empty());
+        assert!(complete_git("git switch --fo", dir_dot).is_empty());
     }
 }
