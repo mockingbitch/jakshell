@@ -7,6 +7,21 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.8] — Tab completion thông minh cho git
+
+### Đã thêm
+
+- **Gợi ý branch / ref khi nhấn `Tab` trong lệnh git** — trước đây gõ `git push feat/` rồi `Tab` không ra gì; giờ shell hiểu ngữ cảnh từng subcommand và gợi ý đúng thứ cần (branch, remote, tag). Ví dụ chính: `git push feat/<Tab>` → liệt kê các nhánh `feat/create-api-list`, `feat/login`, … (lọc theo tiền tố đang gõ, branch không khớp bị bỏ qua). Cơ chế bám đúng pattern completion theo ngữ cảnh sẵn có (như `docker exec <Tab>` → tên container).
+  - `git <Tab>` → tên subcommand phổ biến **+ alias bạn định nghĩa trong `git config`**.
+  - `git checkout` / `switch` / `merge` / `rebase` / `cherry-pick` / `reset` / `log` / `diff` … → branch local + branch remote-tracking + tag.
+  - `git push <Tab>` → remote rồi tới branch local; `git push origin <Tab>` → branch (refspec).
+  - `git pull` / `fetch origin <Tab>` → branch phía remote đó (đã bỏ tiền tố `origin/`).
+  - `git remote` / `stash` / `worktree <Tab>` → subcommand tương ứng; `git tag -d <Tab>` → tag.
+  - Khôn ngoan với ngữ cảnh: đang gõ flag (`-x`) thì không chen ref; sau `--` trả về cho completion file; `git switch -c <tên mới>` không gợi ý nhánh cũ; chạy `git` đúng thư mục hiện tại của shell.
+  - Lọc đúng con trỏ `origin/HEAD` (bị `for-each-ref` rút gọn thành `origin`) nên không còn `origin` trần lọt vào danh sách "remote branch".
+
+---
+
 ## [v1.0.7] — Sửa `history` không hiện lệnh của phiên hiện tại
 
 ### Đã sửa
