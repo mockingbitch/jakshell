@@ -21,6 +21,7 @@ pub struct Shell {
     pub timing: TimingConfig,
     pub greeting: GreetingConfig,
     pub ui: UiConfig,
+    pub update: UpdateConfig,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -91,6 +92,30 @@ impl Default for TimingConfig {
     }
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Bật kiểm tra phiên bản mới khi khởi động (chạy NỀN — không làm chậm shell).
+    pub check: bool,
+    /// Tối thiểu bao nhiêu giờ giữa 2 lần gọi mạng kiểm tra (mặc định 24h).
+    pub interval_hours: u64,
+    /// Khi user chọn "để sau": im trong bao nhiêu giờ rồi nhắc lại (mặc định 8h).
+    pub remind_hours: u64,
+    /// true = hỏi tương tác (Có / Để sau / Bỏ qua / Không); false = chỉ in 1 dòng nhắc.
+    pub prompt: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            interval_hours: 24,
+            remind_hours: 8,
+            prompt: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Job {
     pub id: u32,
@@ -131,6 +156,7 @@ impl Shell {
             timing: TimingConfig::default(),
             greeting: GreetingConfig::default(),
             ui: UiConfig::default(),
+            update: UpdateConfig::default(),
         })
     }
 

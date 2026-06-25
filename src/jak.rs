@@ -798,6 +798,28 @@ fn source_path_file() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("source-path"))
 }
 
+/// Đường dẫn tới source repo đã ghi lúc cài (`~/.config/jaksh/source-path`),
+/// đã kiểm tra tồn tại + là git repo. None nếu không có / không hợp lệ.
+/// Dùng chung cho self-update và bộ kiểm tra cập nhật nền.
+pub fn source_dir() -> Option<std::path::PathBuf> {
+    let raw = std::fs::read_to_string(source_path_file()).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    if path.join(".git").exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Entry công khai để chạy self-update (dùng bởi prompt "Cập nhật ngay?").
+pub fn run_self_update(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+    self_update(shell)
+}
+
 fn self_update(_shell: &Rc<RefCell<Shell>>) -> Result<i32> {
     let path_file = source_path_file();
     let source = match std::fs::read_to_string(&path_file) {

@@ -17,6 +17,7 @@ mod prompt;
 mod shell;
 mod suggest;
 mod theme;
+mod update;
 
 use anyhow::Result;
 use chrono::{Datelike, Timelike};
@@ -58,6 +59,10 @@ fn main() -> Result<()> {
         CliMode::Script(path, script_args) => {
             return run_script(&path, &script_args);
         }
+        CliMode::UpdateRefresh => {
+            update::refresh_blocking();
+            return Ok(());
+        }
         CliMode::Interactive => {} // tiếp tục xuống REPL bên dưới
     }
 
@@ -84,6 +89,10 @@ fn main() -> Result<()> {
     let _ = rl.load_history(&history_path);
 
     print_welcome(&shell);
+
+    // Kiểm tra phiên bản mới: chạy nền cho lần sau + (nếu cache báo có bản mới)
+    // thông báo & hỏi cập nhật. Đặt sau banner, trước prompt đầu tiên.
+    update::startup_check(&shell);
 
     let mut first_prompt = true;
     loop {
@@ -421,6 +430,9 @@ enum CliMode {
     Script(String, Vec<String>),
     Help,
     Version,
+    /// `--update-refresh` (nội bộ) — tiến trình nền: gọi mạng lấy tag mới nhất,
+    /// ghi cache rồi thoát. Không banner, không REPL.
+    UpdateRefresh,
 }
 
 fn parse_cli(args: &[String]) -> CliMode {
@@ -440,6 +452,7 @@ fn parse_cli(args: &[String]) -> CliMode {
             "-l" | "--login" | "-i" | "--interactive" => {}
             "-V" | "--version" => return CliMode::Version,
             "-h" | "--help" => return CliMode::Help,
+            "--update-refresh" => return CliMode::UpdateRefresh,
             "--" => {
                 if let Some((path, rest)) = args[i + 1..].split_first() {
                     return CliMode::Script(path.clone(), rest.to_vec());

@@ -18,6 +18,8 @@ struct RcConfig {
     #[serde(default)]
     ui: Option<crate::shell::UiConfig>,
     #[serde(default)]
+    update: Option<crate::shell::UpdateConfig>,
+    #[serde(default)]
     aliases: std::collections::HashMap<String, String>,
     #[serde(default)]
     env: std::collections::HashMap<String, String>,
@@ -42,6 +44,9 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
         }
         if let Some(ui) = cfg.ui {
             shell.borrow_mut().ui = ui;
+        }
+        if let Some(update) = cfg.update {
+            shell.borrow_mut().update = update;
         }
         for (k, v) in cfg.aliases {
             shell.borrow_mut().aliases.insert(k, v);

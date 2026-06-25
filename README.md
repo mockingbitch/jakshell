@@ -105,6 +105,13 @@ cd ~/.jakshell && git pull --rebase && ./install.sh
 
 Mở terminal mới để dùng bản vừa cập nhật.
 
+**Tự động báo bản mới:** JakShell tự kiểm tra phiên bản mới khi mở shell — việc
+gọi mạng **chạy nền** nên không làm chậm khởi động, và thông báo (nếu có bản
+mới) hiện ở lần mở kế tiếp. Khi có bản mới, shell hỏi một lần cho mỗi version:
+**có** cập nhật ngay · **để sau** (nhắc lại sau vài giờ) · **bỏ qua bản này** ·
+**không**. Tuỳ chỉnh hoặc tắt qua section `[update]` trong `~/.jakshrc.toml`
+(xem [Cấu hình](#cấu-hình)).
+
 ---
 
 ## Bắt đầu nhanh
@@ -517,6 +524,12 @@ enabled = true
 show_greeting = true        # dòng "Chào buổi …"
 show_tip = true             # mẹo ngẫu nhiên
 name = ""                   # rỗng = lấy $USER
+
+[update]
+check = true                # kiểm tra bản mới khi mở shell (gọi mạng CHẠY NỀN)
+interval_hours = 24         # tối thiểu bao nhiêu giờ giữa 2 lần gọi mạng
+remind_hours = 8            # chọn "để sau" → im bấy nhiêu giờ rồi nhắc lại
+prompt = true               # false = chỉ in 1 dòng nhắc, không hỏi tương tác
 
 [aliases]
 ll = "ls -lah"

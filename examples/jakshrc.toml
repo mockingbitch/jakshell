@@ -42,6 +42,18 @@ show_tip = true
 # Tên hiển thị (rỗng = lấy từ $USER)
 name = ""
 
+[update]
+# Kiểm tra phiên bản mới khi mở shell. Việc gọi mạng CHẠY NỀN nên không bao
+# giờ làm chậm lúc khởi động; thông báo (nếu có bản mới) hiện ở lần mở kế tiếp.
+check = true
+# Tối thiểu bao nhiêu giờ giữa 2 lần gọi mạng kiểm tra.
+interval_hours = 24
+# Khi chọn "để sau" (l/Enter): im trong bao nhiêu giờ rồi mới nhắc lại.
+remind_hours = 8
+# true = hỏi tương tác (có / để sau / bỏ qua / không).
+# false = chỉ in 1 dòng nhắc "gõ jak update", không hỏi.
+prompt = true
+
 [aliases]
 ll = "ls -lah"
 la = "ls -A"
