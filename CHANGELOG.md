@@ -7,6 +7,21 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.9] — Tự thông báo & hỏi cập nhật khi có bản mới
+
+### Đã thêm
+
+- **Tự kiểm tra & thông báo phiên bản mới** — mỗi client tự phát hiện khi có bản JakShell mới và thông báo, không cần bạn đi báo từng máy. Việc gọi mạng (`git ls-remote` tới repo nguồn) **chạy NỀN** nên không bao giờ làm chậm lúc mở shell; thông báo hiện ở lần mở kế tiếp:
+  - **Hỏi cập nhật 1 lần cho mỗi version** ngay tại client: `[y] có` (chạy `jak self-update` luôn) · `[l/Enter] để sau` (im trong `remind_hours` rồi nhắc lại) · `[s] bỏ qua bản này` (im tới khi có bản mới hơn) · `[n] không` (chỉ im phiên này).
+  - Cấu hình qua section `[update]` trong `~/.jakshrc.toml`: `check` (bật/tắt), `interval_hours` (mặc định 24 — tối thiểu giữa 2 lần gọi mạng), `remind_hours` (mặc định 8), `prompt` (`false` = chỉ in 1 dòng nhắc, không hỏi). Kết quả check lưu cache tại `~/.config/jaksh/update-check.json`.
+  - Chỉ chạy khi shell thực sự tương tác (stdin/stdout là terminal) và có repo nguồn (`~/.config/jaksh/source-path`). Bỏ qua type-ahead (xả input trước khi hỏi) nên không nuốt nhầm lệnh bạn vừa gõ; offline/lỗi mạng vẫn lùi đúng nhịp `interval_hours`, không spawn lại mỗi lần mở shell; ghi cache atomic + tiến trình nền `setsid` tách khỏi terminal.
+
+### Tài liệu
+
+- README + `examples/jakshrc.toml`: thêm docs section `[update]` và phần "Tự động báo bản mới".
+
+---
+
 ## [v1.0.8] — Tab completion thông minh cho git
 
 ### Đã thêm
