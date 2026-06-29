@@ -7,6 +7,24 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.10] — `jak news`: tin tức + AI phân loại & tóm tắt
+
+### Đã thêm
+
+- **`jak news`** — crawl tin từ các nguồn RSS uy tín rồi dùng AI (Claude) phân loại theo chủ đề và tóm tắt 2–3 ý chính mỗi bài, hiển thị gọn ngay trong terminal:
+  - **Lệnh:** `jak news` (xem tin, tự crawl + tóm tắt nếu cache đã cũ) · `jak news refresh` (ép làm mới) · `jak news <chủ-đề>` (lọc, vd `jak news cong-nghe`) · `jak news <số>` (chi tiết 1 bài + link) · `jak news sources` (xem nguồn + cấu hình) · `jak news help`.
+  - **Crawl** qua `curl` (parser RSS/Atom tự viết, không thêm dependency); xử lý CDATA, thực thể HTML, nhiều định dạng ngày (RFC 2822/3339 và định dạng US của vài báo). Dedup theo link, chia hạn ngạch đều giữa các nguồn để đa dạng.
+  - **AI** gọi `POST /v1/messages` (mặc định `claude-haiku-4-5`) với **structured output** — gộp nhiều bài trong 1 request nên rẻ; prompt-cache trên system prompt. Phân loại vào 1 trong các chủ đề: Thời sự / Thế giới / Kinh tế / Công nghệ / Khoa học / Thể thao / Giải trí / Sức khỏe / Giáo dục / Khác.
+  - **API key do bạn cung cấp** qua env `ANTHROPIC_API_KEY` (ưu tiên) hoặc `[news] api_key`. Thiếu key vẫn crawl & xem tin thô (mô tả gốc), chỉ bỏ phần AI — không bao giờ chặn.
+  - **Cache** tại `~/.config/jaksh/news-cache.json` với TTL (`ttl_minutes`, mặc định 30) — không gọi AI lại trong khoảng còn tươi, tránh tốn tiền ngầm. AI chỉ chạy khi bạn chủ động gọi và cache đã hết hạn (không có daemon nền).
+  - Cấu hình qua section `[news]` trong `~/.jakshrc.toml`: `sources`, `max_items` (mặc định 20), `ttl_minutes`, `model`, `ai` (bật/tắt AI), `api_key`.
+
+### Tài liệu
+
+- README + `examples/jakshrc.toml`: thêm mục `jak news` và docs section `[news]`.
+
+---
+
 ## [v1.0.9] — Tự thông báo & hỏi cập nhật khi có bản mới
 
 ### Đã thêm
