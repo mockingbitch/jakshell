@@ -25,6 +25,7 @@ Gõ ? hoặc help bất cứ lúc nào.
   - [`--jak` — tô màu + format output](#--jak--tô-màu--format-output)
   - [`jak <…>` — tiện ích JakShell](#jak--tiện-ích-jakshell)
   - [`jak find` — tìm kiếm tự nhiên](#jak-find--tìm-kiếm-tự-nhiên)
+  - [`jak news` — tin tức + AI tóm tắt](#jak-news--tin-tức--ai-tóm-tắt)
   - [`jak git` — workflow git rút gọn](#jak-git--workflow-git-rút-gọn)
   - [`jak version` & `jak self-update`](#jak-version--jak-self-update)
   - [`bookmark` — đặt tên cho lệnh dài](#bookmark--đặt-tên-cho-lệnh-dài)
@@ -48,7 +49,8 @@ Gõ ? hoặc help bất cứ lúc nào.
 - **POSIX-compatible** — pipe `|`, `&&`, `||`, `;`, redirect `> >> < 2> 2>> &>`, job nền, glob, biến, tilde, quote chuẩn.
 - **`explain <lệnh>`** — usage / tham số / ví dụ + chú thích từng cột output thật (ls, ps, df, du, free). 70+ lệnh.
 - **`--jak`** trên `ls / ps / df / du / git status / git branch` — tô màu + format lại.
-- **`jak …`** — `clean / backup / update / find / open / sysinfo / ip / weather / theme / git / version / self-update / lang`.
+- **`jak …`** — `clean / backup / update / find / open / sysinfo / ip / weather / news / theme / git / version / self-update / lang`.
+- **`jak news`** — crawl tin từ RSS uy tín rồi dùng AI (Claude) phân loại theo chủ đề + tóm tắt ý chính. Key do bạn cung cấp; thiếu key vẫn xem được tin thô.
 - **`bookmark`** — đặt tên cho lệnh dài, chạy qua `jak <name>`.
 - **Smart git prompt** — branch + dirty `*` + `↑↓` ahead/behind + stash `⚑N` + state `MERGE/REBASE`.
 - **Trải nghiệm gõ lệnh** — inline autosuggest, tab completion list-mode với icon, context-aware path, timing `⏱`, did-you-mean, hint khi fail, `ls` tự tô màu.
@@ -208,6 +210,7 @@ jak help                    # hoặc: jak ?
 | `jak sysinfo` | OS, CPU, RAM, đĩa |
 | `jak ip` | IP nội bộ + public (thử ipconfig/hostname/ip, curl/wget) |
 | `jak weather [tp]` | Thời tiết qua wttr.in |
+| `jak news …` | Tin tức từ RSS + AI phân loại & tóm tắt (xem [jak news](#jak-news--tin-tức--ai-tóm-tắt)) |
 | `jak theme <tên>` | Đổi giao diện nóng: `ocean / forest / sunset / mono / default` |
 | `jak git …` | Workflow git rút gọn (xem [jak git](#jak-git--workflow-git-rút-gọn)) |
 | `jak <bookmark>` | Chạy bookmark đã đặt (xem [bookmark](#bookmark--đặt-tên-cho-lệnh-dài)) |
@@ -237,6 +240,38 @@ Quy tắc:
 - Quote tôn trọng chuẩn POSIX: `"*.rs"` là literal, `*.rs` (không nháy) bị shell glob-expand trước.
 
 Lệnh `find` POSIX gốc (`find . -name "*.rs"`) **vẫn dùng như bình thường** — JakShell không can thiệp.
+
+---
+
+### `jak news` — tin tức + AI tóm tắt
+
+Crawl tin từ các nguồn **RSS** uy tín, rồi dùng **AI (Claude)** phân loại theo chủ đề và tóm tắt 2–3 ý chính mỗi bài — hiển thị gọn ngay trong terminal.
+
+```bash
+jak news                 # tin mới (tự crawl + tóm tắt nếu cache đã cũ)
+jak news refresh         # ép crawl + tóm tắt lại ngay
+jak news cong-nghe       # lọc theo chủ đề (bỏ dấu cũng được)
+jak news 3               # chi tiết bài số 3 (ý chính + link)
+jak news sources         # xem nguồn RSS + cấu hình hiện tại
+jak news help
+```
+
+**Bật AI** — phần phân loại + tóm tắt cần API key Anthropic của **bạn**:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...      # hoặc đặt [news] api_key trong ~/.jakshrc.toml
+jak news refresh
+```
+
+Thiếu key → JakShell **vẫn crawl và hiện tin thô** (tiêu đề + mô tả gốc), chỉ bỏ phần AI, không bao giờ chặn.
+
+Cơ chế:
+- **Nguồn**: danh sách RSS trong `[news] sources` — mặc định VnExpress / Tuổi Trẻ / Thanh Niên; thêm/bớt tuỳ ý (phần lớn báo VN đều có endpoint `.rss`).
+- **Rẻ & ổn định**: gộp nhiều bài vào **1 request** với *structured output* (JSON schema) — model mặc định `claude-haiku-4-5`. Crawl qua `curl`, parser RSS/Atom không cần thư viện ngoài.
+- **Cache** tại `~/.config/jaksh/news-cache.json`, tươi trong `ttl_minutes` (mặc định 30). Trong khoảng đó `jak news` đọc cache, **không gọi AI lại** (tránh tốn tiền). Không có tiến trình nền — AI chỉ chạy khi bạn chủ động gọi và cache đã hết hạn.
+- **Chủ đề**: Thời sự / Thế giới / Kinh tế / Công nghệ / Khoa học / Thể thao / Giải trí / Sức khỏe / Giáo dục / Khác.
+
+Cấu hình đầy đủ ở section `[news]` (xem [Cấu hình](#jakshrctoml--cấu-hình-toml)).
 
 ---
 
@@ -531,6 +566,18 @@ interval_hours = 24         # tối thiểu bao nhiêu giờ giữa 2 lần gọ
 remind_hours = 8            # chọn "để sau" → im bấy nhiêu giờ rồi nhắc lại
 prompt = true               # false = chỉ in 1 dòng nhắc, không hỏi tương tác
 
+[news]                      # jak news — tin tức + AI tóm tắt
+sources = [                 # danh sách link RSS (báo VN đa số có endpoint .rss)
+  "https://vnexpress.net/rss/tin-moi-nhat.rss",
+  "https://tuoitre.vn/rss/tin-moi-nhat.rss",
+  "https://thanhnien.vn/rss/home.rss",
+]
+max_items = 20              # số bài tối đa mỗi lần làm mới
+ttl_minutes = 30            # cache còn tươi bấy nhiêu phút (không gọi AI lại)
+model = "claude-haiku-4-5"  # model Claude cho phân loại + tóm tắt
+ai = true                   # false = chỉ crawl + hiện tin thô (không tốn tiền)
+api_key = ""                # nên để rỗng & dùng env ANTHROPIC_API_KEY (ưu tiên)
+
 [aliases]
 ll = "ls -lah"
 gs = "git status"
@@ -570,6 +617,7 @@ alias ..="cd .."        # nháy kép bắt buộc khi value > 1 từ
 | `~/.jakshrc` | Script khởi động (chạy mỗi khi mở shell) |
 | `~/.config/jaksh/history` | Lịch sử lệnh |
 | `~/.config/jaksh/bookmarks.toml` | Bookmark do `bookmark` quản lý |
+| `~/.config/jaksh/news-cache.json` | Cache tin tức của `jak news` (có TTL) |
 
 ---
 

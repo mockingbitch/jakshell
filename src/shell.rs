@@ -22,6 +22,7 @@ pub struct Shell {
     pub greeting: GreetingConfig,
     pub ui: UiConfig,
     pub update: UpdateConfig,
+    pub news: NewsConfig,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -116,6 +117,43 @@ impl Default for UpdateConfig {
     }
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct NewsConfig {
+    /// Danh sách link RSS để crawl tin.
+    pub sources: Vec<String>,
+    /// Số bài tối đa mỗi lần làm mới.
+    pub max_items: usize,
+    /// Cache còn "tươi" trong bao nhiêu phút (`jak news` không crawl lại trong
+    /// khoảng này — tránh gọi AI lặp lại tốn tiền).
+    pub ttl_minutes: u64,
+    /// Model Claude dùng để phân loại + tóm tắt.
+    pub model: String,
+    /// API key Anthropic. Để rỗng và dùng env `ANTHROPIC_API_KEY` (ưu tiên env).
+    pub api_key: String,
+    /// Bật phân loại + tóm tắt bằng AI. false = chỉ crawl + hiện tin thô.
+    pub ai: bool,
+}
+
+impl Default for NewsConfig {
+    fn default() -> Self {
+        Self {
+            // Vài nguồn tiếng Việt uy tín có RSS sẵn. User tự thêm/bớt trong
+            // ~/.jakshrc.toml [news] sources.
+            sources: vec![
+                "https://vnexpress.net/rss/tin-moi-nhat.rss".into(),
+                "https://tuoitre.vn/rss/tin-moi-nhat.rss".into(),
+                "https://thanhnien.vn/rss/home.rss".into(),
+            ],
+            max_items: 20,
+            ttl_minutes: 30,
+            model: "claude-haiku-4-5".into(),
+            api_key: String::new(),
+            ai: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Job {
     pub id: u32,
@@ -157,6 +195,7 @@ impl Shell {
             greeting: GreetingConfig::default(),
             ui: UiConfig::default(),
             update: UpdateConfig::default(),
+            news: NewsConfig::default(),
         })
     }
 

@@ -450,6 +450,14 @@ pub fn t(key: &str) -> &'static str {
             "查看天气 (来自 wttr.in)",
             "ดูสภาพอากาศ (ผ่าน wttr.in)",
         ]),
+        "jak.desc.news"        => tr(lang, [
+            "Tin tức từ RSS + AI phân loại & tóm tắt — gõ `jak news help`",
+            "News from RSS + AI classify & summarize — type `jak news help`",
+            "RSS 뉴스 + AI 분류·요약 — `jak news help` 입력",
+            "RSS ニュース + AI 分類・要約 — `jak news help`",
+            "RSS 新闻 + AI 分类与摘要 — 输入 `jak news help`",
+            "ข่าวจาก RSS + AI จัดหมวด & สรุป — พิมพ์ `jak news help`",
+        ]),
         "jak.desc.git"         => tr(lang, [
             "Workflow git: gõ `jak git` để xem chi tiết",
             "Git workflow: type `jak git` for details",

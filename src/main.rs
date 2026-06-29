@@ -11,6 +11,7 @@ mod info;
 mod jak;
 mod lexer;
 mod markdown;
+mod news;
 mod parser;
 mod pretty;
 mod prompt;

@@ -54,6 +54,27 @@ remind_hours = 8
 # false = chỉ in 1 dòng nhắc "gõ jak update", không hỏi.
 prompt = true
 
+[news]
+# `jak news` — crawl tin từ RSS rồi dùng AI (Claude) phân loại + tóm tắt.
+# Nguồn tin: thêm/bớt link RSS tuỳ ý (phần lớn báo VN đều có endpoint .rss).
+sources = [
+  "https://vnexpress.net/rss/tin-moi-nhat.rss",
+  "https://tuoitre.vn/rss/tin-moi-nhat.rss",
+  "https://thanhnien.vn/rss/home.rss",
+]
+# Số bài tối đa mỗi lần làm mới.
+max_items = 20
+# Cache còn "tươi" trong bao nhiêu phút — trong khoảng này `jak news` không
+# crawl/gọi AI lại (tránh tốn tiền). `jak news refresh` luôn ép làm mới.
+ttl_minutes = 30
+# Model Claude dùng cho phân loại + tóm tắt (haiku rẻ & nhanh cho việc này).
+model = "claude-haiku-4-5"
+# Bật/tắt phần AI. false = chỉ crawl + hiện tin thô (không tốn tiền).
+ai = true
+# API key Anthropic. KHUYẾN NGHỊ: để rỗng ở đây và đặt env ANTHROPIC_API_KEY
+# (env được ưu tiên). Chỉ điền vào đây nếu bạn chấp nhận key nằm trong file config.
+api_key = ""
+
 [aliases]
 ll = "ls -lah"
 la = "ls -A"
