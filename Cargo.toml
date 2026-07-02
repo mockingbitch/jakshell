@@ -1,6 +1,6 @@
 [package]
 name = "jaksh"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2021"
 description = "JakShell — a fast, friendly Rust shell for macOS and Linux"
 authors = ["JakShell contributors"]

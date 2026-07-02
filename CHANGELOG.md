@@ -7,6 +7,19 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.0.11] — `eval` + command substitution `$(...)` / backticks
+
+### Đã thêm
+
+- **Command substitution** — thay thế `$(lệnh)` và `` `lệnh` `` bằng stdout của lệnh, dùng được ở mọi vị trí trong dòng lệnh: tham số, ghép chuỗi (`prefix_$(cmd)_suffix`), đích redirect (`> $(cmd)`), và trong pipeline. Hỗ trợ **lồng nhau** `$(a $(b))`, `$(...)` bên trong nháy kép `"..."` (giữ nguyên khoảng trắng), và bỏ qua ngoặc `)` nằm trong nháy bên trong. Nháy đơn giữ nguyên `$(...)` như chuỗi thường. Stdout được thu bằng cách hoán đổi fd stdout sang **file tạm** (không dùng pipe) nên không kẹt khi output lớn hơn buffer.
+- **`eval`** — builtin nối các tham số bằng dấu cách rồi phân tích + thực thi như một dòng lệnh trong **chính shell hiện tại** (phép gán / `cd` bên trong có hiệu lực). Nhờ đó chạy được các script khởi tạo phổ biến, ví dụ `eval "$(brew shellenv)"`, `eval "$(zoxide init jaksh)"`.
+
+### Ghi chú
+
+- `$(...)` chạy **in-process** (không fork subshell) — side effect như `cd` / gán biến bên trong sẽ ảnh hưởng shell cha. Đủ dùng cho các lệnh đọc/in dữ liệu (`brew shellenv`, `git rev-parse`, `date`, …). Kết quả **không bị tách từ**, nhất quán với cách shell vốn xử lý `$VAR`. Chưa hỗ trợ tham số mở rộng `${VAR:-default}` / `${VAR+alt}`.
+
+---
+
 ## [v1.0.10] — `jak news`: tin tức + AI phân loại & tóm tắt
 
 ### Đã thêm
