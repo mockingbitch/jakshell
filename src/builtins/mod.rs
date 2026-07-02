@@ -10,6 +10,7 @@ pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
     "help", "?", "which", "true", "false", "explain", "bookmark", "exec",
+    "eval",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -44,6 +45,7 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "explain" => crate::explain::run(shell, &argv[1..].to_vec()),
         "bookmark" => crate::bookmark::run(shell, argv),
         "exec" => exec_replace(shell, &args),
+        "eval" => eval(shell, &args),
         _ => Err(anyhow!("builtin chưa hỗ trợ: {}", cmd)),
     };
     flush_std();
@@ -432,4 +434,18 @@ fn exec_replace(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
         eprintln!("jaksh: exec: không chạy được {}: {}", args[0], err);
         Ok(126)
     }
+}
+
+/// `eval <lời...>` — nối các tham số bằng dấu cách rồi phân tích + thực thi như
+/// một dòng lệnh trong chính shell hiện tại (POSIX). Nhờ đó các init script phổ
+/// biến chạy được, ví dụ `eval "$(brew shellenv)"`, `eval "$(zoxide init ...)"`.
+/// Chạy in-process nên phép gán / `cd` bên trong có hiệu lực với shell cha.
+fn eval(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    if args.is_empty() {
+        return Ok(0);
+    }
+    let src = args.join(" ");
+    let tokens = crate::lexer::tokenize(&src)?;
+    let ast = crate::parser::parse(&tokens)?;
+    crate::executor::execute(shell, &ast)
 }

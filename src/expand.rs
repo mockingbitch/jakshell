@@ -25,6 +25,11 @@ pub fn expand_word(shell: &Shell, parts: &[WordPart], do_glob: bool) -> Vec<Stri
                     s.push_str(&h.display().to_string());
                 }
             }
+            // Command substitution đã được executor chạy & thay bằng Quoted
+            // TRƯỚC khi tới đây (xem executor::expand_command_subs). Nếu vẫn còn
+            // CmdSub thì coi như rỗng — an toàn cho các nơi expand không qua
+            // executor (completion, prompt).
+            WordPart::CmdSub(_) => {}
         }
     }
 

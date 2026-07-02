@@ -22,6 +22,9 @@ pub enum WordPart {
     Quoted(String), // nội dung từ trong nháy đơn/kép — không bao giờ bị glob
     Var(String),
     Tilde,
+    /// Command substitution `$(...)` hoặc `` `...` `` — giữ nguyên phần lệnh bên
+    /// trong (chưa chạy). Executor chạy nó rồi thay bằng stdout trước khi expand.
+    CmdSub(String),
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>> {
@@ -191,11 +194,31 @@ fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
                     }
                 }
                 if ch == '$' {
+                    // `$(...)` bên trong nháy kép vẫn là command substitution
+                    // (chỉ chặn glob/word-split, không chặn thay thế lệnh).
+                    if bytes.get(i + 1) == Some(&'(') {
+                        if !qbuf.is_empty() {
+                            parts.push(WordPart::Quoted(std::mem::take(&mut qbuf)));
+                        }
+                        let (inner, next) = read_cmd_sub_paren(bytes, i + 2)?;
+                        parts.push(WordPart::CmdSub(inner));
+                        i = next;
+                        continue;
+                    }
                     if !qbuf.is_empty() {
                         parts.push(WordPart::Quoted(std::mem::take(&mut qbuf)));
                     }
                     let (name, next) = read_var(bytes, i + 1);
                     parts.push(WordPart::Var(name));
+                    i = next;
+                    continue;
+                }
+                if ch == '`' {
+                    if !qbuf.is_empty() {
+                        parts.push(WordPart::Quoted(std::mem::take(&mut qbuf)));
+                    }
+                    let (inner, next) = read_backtick(bytes, i + 1)?;
+                    parts.push(WordPart::CmdSub(inner));
                     i = next;
                     continue;
                 }
@@ -230,11 +253,32 @@ fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
         }
 
         if c == '$' {
+            // `$(...)` = command substitution.
+            if bytes.get(i + 1) == Some(&'(') {
+                if !buf.is_empty() {
+                    parts.push(WordPart::Literal(std::mem::take(&mut buf)));
+                }
+                let (inner, next) = read_cmd_sub_paren(bytes, i + 2)?;
+                parts.push(WordPart::CmdSub(inner));
+                i = next;
+                continue;
+            }
             if !buf.is_empty() {
                 parts.push(WordPart::Literal(std::mem::take(&mut buf)));
             }
             let (name, next) = read_var(bytes, i + 1);
             parts.push(WordPart::Var(name));
+            i = next;
+            continue;
+        }
+
+        if c == '`' {
+            // Backtick command substitution `` `...` `` (dạng cũ, vẫn phổ biến).
+            if !buf.is_empty() {
+                parts.push(WordPart::Literal(std::mem::take(&mut buf)));
+            }
+            let (inner, next) = read_backtick(bytes, i + 1)?;
+            parts.push(WordPart::CmdSub(inner));
             i = next;
             continue;
         }
@@ -281,6 +325,89 @@ fn read_var(bytes: &[char], start: usize) -> (String, usize) {
     (name, i)
 }
 
+/// Đọc nội dung `$(...)` bắt đầu ngay SAU `$(` (tại `start`), trả về (nội_dung,
+/// vị_trí_sau_dấu_`)`). Đếm ngoặc lồng nhau và bỏ qua ngoặc nằm trong nháy
+/// đơn/kép để `$(echo ")")` hay `$(a $(b) c)` không kết thúc sớm.
+fn read_cmd_sub_paren(bytes: &[char], start: usize) -> Result<(String, usize)> {
+    let mut depth = 1;
+    let mut i = start;
+    let mut inner = String::new();
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            '(' => {
+                depth += 1;
+                inner.push(c);
+                i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((inner, i + 1));
+                }
+                inner.push(c);
+                i += 1;
+            }
+            '\'' => {
+                inner.push(c);
+                i += 1;
+                while i < bytes.len() && bytes[i] != '\'' {
+                    inner.push(bytes[i]);
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    inner.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            '"' => {
+                inner.push(c);
+                i += 1;
+                while i < bytes.len() && bytes[i] != '"' {
+                    if bytes[i] == '\\' && i + 1 < bytes.len() {
+                        inner.push(bytes[i]);
+                        inner.push(bytes[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    inner.push(bytes[i]);
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    inner.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            _ => {
+                inner.push(c);
+                i += 1;
+            }
+        }
+    }
+    Err(anyhow!("$(...) không đóng"))
+}
+
+/// Đọc nội dung `` `...` `` bắt đầu ngay SAU dấu backtick mở (tại `start`).
+/// Trong backtick, `\`` `\\` `\$` được escape (POSIX).
+fn read_backtick(bytes: &[char], start: usize) -> Result<(String, usize)> {
+    let mut i = start;
+    let mut inner = String::new();
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == '\\' && i + 1 < bytes.len() && matches!(bytes[i + 1], '`' | '\\' | '$') {
+            inner.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '`' {
+            return Ok((inner, i + 1));
+        }
+        inner.push(c);
+        i += 1;
+    }
+    Err(anyhow!("`...` không đóng"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +424,7 @@ mod tests {
                             WordPart::Literal(s) | WordPart::Quoted(s) => s.clone(),
                             WordPart::Var(s) => format!("${}", s),
                             WordPart::Tilde => "~".to_string(),
+                            WordPart::CmdSub(s) => format!("$({})", s),
                         })
                         .collect::<String>(),
                 ),
@@ -348,5 +476,76 @@ mod tests {
         // comment ở dòng 1 không nuốt dòng 2
         let w = words("echo a # ghi chú\necho b");
         assert_eq!(w, vec!["echo", "a", "echo", "b"]);
+    }
+
+    /// Lấy các WordPart của word thứ `idx` (0-based) trong input.
+    fn word_parts(input: &str, idx: usize) -> Vec<WordPart> {
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .filter_map(|t| match t {
+                Token::Word(parts) => Some(parts),
+                _ => None,
+            })
+            .nth(idx)
+            .unwrap()
+    }
+
+    #[test]
+    fn dollar_paren_is_command_substitution() {
+        assert_eq!(
+            word_parts("echo $(date +%s)", 1),
+            vec![WordPart::CmdSub("date +%s".into())]
+        );
+    }
+
+    #[test]
+    fn backtick_is_command_substitution() {
+        assert_eq!(
+            word_parts("echo `uname -s`", 1),
+            vec![WordPart::CmdSub("uname -s".into())]
+        );
+    }
+
+    #[test]
+    fn nested_command_substitution() {
+        // ngoặc lồng nhau không kết thúc sớm
+        assert_eq!(
+            word_parts("echo $(a $(b) c)", 1),
+            vec![WordPart::CmdSub("a $(b) c".into())]
+        );
+    }
+
+    #[test]
+    fn cmdsub_inside_double_quotes() {
+        // $(...) trong "..." vẫn là cmdsub; phần chữ quanh nó thành Quoted
+        assert_eq!(
+            word_parts("x\"$(id -u)\"", 0),
+            vec![WordPart::Literal("x".into()), WordPart::CmdSub("id -u".into())]
+        );
+    }
+
+    #[test]
+    fn single_quotes_keep_cmdsub_literal() {
+        // trong nháy đơn, $(...) là chuỗi thường, KHÔNG chạy
+        assert_eq!(
+            word_parts("'$(nope)'", 0),
+            vec![WordPart::Quoted("$(nope)".into())]
+        );
+    }
+
+    #[test]
+    fn cmdsub_paren_inside_quotes_does_not_close_early() {
+        // dấu ) nằm trong nháy bên trong $(...) không kết thúc cmdsub
+        assert_eq!(
+            word_parts("echo $(echo \")\")", 1),
+            vec![WordPart::CmdSub("echo \")\"".into())]
+        );
+    }
+
+    #[test]
+    fn unclosed_cmdsub_errors() {
+        assert!(tokenize("echo $(oops").is_err());
+        assert!(tokenize("echo `oops").is_err());
     }
 }

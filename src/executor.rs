@@ -1,11 +1,14 @@
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
 use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use crate::builtins;
 use crate::expand::expand_word;
+use crate::lexer::WordPart;
 use crate::parser::{Pipeline, Program, Redirect, RedirectKind, SeqOp, SimpleCommand};
 use crate::shell::Shell;
 
@@ -36,6 +39,14 @@ pub fn execute(shell: &Rc<RefCell<Shell>>, prog: &Program) -> Result<i32> {
 fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> {
     // Resolve aliases on the head command (one-level, like bash default).
     let mut commands: Vec<SimpleCommand> = pipeline.commands.clone();
+    // Command substitution `$(...)` / `` `...` `` — chạy lệnh con & thay bằng
+    // stdout TRƯỚC khi giải alias và expand biến/glob (giống thứ tự của bash).
+    for cmd in &mut commands {
+        if let Err(e) = expand_command_subs(shell, cmd) {
+            eprintln!("jaksh: {}", e);
+            return Ok(1);
+        }
+    }
     expand_aliases(shell, &mut commands);
 
     if commands.len() == 1 {
@@ -324,6 +335,131 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
 /// stdout có phải terminal không — quyết định có bật auto-pretty (curl, …).
 fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+/// Thay mọi `WordPart::CmdSub` trong 1 lệnh (cả words lẫn đích redirect) bằng
+/// kết quả chạy lệnh con. Gọi ở đầu `run_pipeline`, khi CHƯA giữ borrow nào của
+/// shell — nên chạy lệnh con (mượn shell mutably) an toàn.
+fn expand_command_subs(shell: &Rc<RefCell<Shell>>, cmd: &mut SimpleCommand) -> Result<()> {
+    for w in &mut cmd.words {
+        expand_parts_cmdsub(shell, w)?;
+    }
+    for r in &mut cmd.redirects {
+        expand_parts_cmdsub(shell, &mut r.target)?;
+    }
+    Ok(())
+}
+
+fn expand_parts_cmdsub(shell: &Rc<RefCell<Shell>>, parts: &mut Vec<WordPart>) -> Result<()> {
+    if !parts.iter().any(|p| matches!(p, WordPart::CmdSub(_))) {
+        return Ok(());
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for p in parts.drain(..) {
+        match p {
+            WordPart::CmdSub(src) => {
+                let captured = capture_command_output(shell, &src)?;
+                // Quoted → không glob & không tách từ; đúng nhu cầu phổ biến
+                // nhất (`eval "$(brew shellenv)"`, `x="$(cmd)"`, `$(git ...)`),
+                // và khớp cách shell này vốn không tách từ khi expand biến.
+                out.push(WordPart::Quoted(captured));
+            }
+            other => out.push(other),
+        }
+    }
+    *parts = out;
+    Ok(())
+}
+
+/// Chạy `src` như một chương trình con và thu lại stdout của nó — phần lõi của
+/// command substitution. Chạy IN-PROCESS trong shell hiện tại (không fork một
+/// subshell thật), nên side effect như `cd` / gán biến bên trong `$(...)` sẽ
+/// ảnh hưởng shell cha; đủ dùng cho các lệnh chỉ đọc/in dữ liệu (brew shellenv,
+/// git rev-parse, date, pwd, ...). Thu bằng cách hoán fd 1 sang FILE TẠM (không
+/// dùng pipe) để tránh kẹt khi output lớn hơn buffer pipe.
+fn capture_command_output(shell: &Rc<RefCell<Shell>>, src: &str) -> Result<String> {
+    let tokens = crate::lexer::tokenize(src)?;
+    let prog = crate::parser::parse(&tokens)?;
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "jaksh-cmdsub-{}-{}",
+        std::process::id(),
+        next_capture_id()
+    ));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| anyhow!("$(...): không tạo được file tạm: {}", e))?;
+
+    // Hoán fd 1 → file trong một scope; drop sẽ khôi phục fd gốc.
+    {
+        let _swap = FdSwap::new(libc::STDOUT_FILENO, file.as_raw_fd())?;
+        flush_std();
+        let _ = execute(shell, &prog);
+        flush_std();
+    }
+
+    let mut file = file;
+    file.seek(SeekFrom::Start(0)).ok();
+    let mut s = String::new();
+    file.read_to_string(&mut s).ok();
+    let _ = std::fs::remove_file(&path);
+
+    // Bỏ mọi newline ở cuối (đúng như POSIX command substitution).
+    let end = s.trim_end_matches('\n').len();
+    s.truncate(end);
+    Ok(s)
+}
+
+fn flush_std() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+}
+
+/// Bộ đếm để đặt tên file tạm duy nhất trong 1 tiến trình (tránh đụng khi có
+/// nhiều `$(...)` lồng/nối tiếp).
+fn next_capture_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Hoán đổi tạm một file descriptor (thường là stdout=1) sang `new_fd`; khi drop
+/// sẽ khôi phục nguyên trạng. Dùng cho command substitution.
+struct FdSwap {
+    target: i32,
+    saved: i32,
+}
+
+impl FdSwap {
+    fn new(target: i32, new_fd: i32) -> Result<Self> {
+        unsafe {
+            let saved = libc::dup(target);
+            if saved < 0 {
+                return Err(anyhow!("dup({}) thất bại", target));
+            }
+            if libc::dup2(new_fd, target) < 0 {
+                libc::close(saved);
+                return Err(anyhow!("dup2 thất bại"));
+            }
+            Ok(FdSwap { target, saved })
+        }
+    }
+}
+
+impl Drop for FdSwap {
+    fn drop(&mut self) {
+        flush_std();
+        unsafe {
+            libc::dup2(self.saved, self.target);
+            libc::close(self.saved);
+        }
+    }
 }
 
 /// Tách các phép gán `VAR=val` đứng đầu lệnh (bash-style):
