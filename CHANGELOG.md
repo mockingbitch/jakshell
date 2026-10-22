@@ -7,6 +7,18 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.1.1] — Login shell đọc `~/.profile` như bash
+
+### Đã sửa
+
+- **`cargo` / `node` / công cụ khác "không tìm thấy lệnh" khi jaksh là shell mặc định** — các công cụ như rustup (`~/.cargo/env`), nvm, `~/.local/bin` tự thêm vào PATH qua `~/.profile`, nhưng jaksh không đọc file này. Giờ khi chạy làm **login shell** (`jaksh -l`, hoặc được hệ thống khởi động dưới tên `-jaksh`), jaksh đọc `/etc/profile` rồi `~/.jaksh_profile` (nếu có) hoặc `~/.profile` — như bash. Đăng nhập lại một lần để cả phiên desktop / VSCode / mọi tab nhận PATH mới. Profile có lỗi chỉ được báo và bỏ qua, không chặn đăng nhập.
+
+### Tài liệu
+
+- `examples/jakshrc`: chỉ thêm `~/.local/bin` vào PATH khi chưa có (mở jaksh lồng nhau không còn lặp PATH) và nạp `~/.cargo/env` nếu có. Nếu `~/.jakshrc` của bạn tạo từ mẫu cũ, nên sửa dòng `export PATH=$HOME/.local/bin:$PATH` theo mẫu mới.
+
+---
+
 ## [v1.1.0] — Tương thích bash: script, job control, lịch sử thông minh
 
 Bản lớn nhất từ trước tới nay: jaksh chạy được script bash thật (đối chiếu tự động với bash: **233/235** case khớp), Ctrl-C không bao giờ giết shell, và có thêm những thứ bash không có. Chi tiết từng hạng mục: [`docs/bash-gap-audit.md`](docs/bash-gap-audit.md).
