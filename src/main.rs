@@ -1,6 +1,7 @@
 mod arith;
 mod bookmark;
 mod builtins;
+mod check;
 mod completion;
 mod cond;
 mod config;
@@ -8,6 +9,9 @@ mod executor;
 mod expand;
 mod explain;
 mod findcmd;
+mod highlight;
+mod histstore;
+mod fuzzy;
 mod history;
 mod i18n;
 mod info;
@@ -20,6 +24,7 @@ mod parser;
 mod pretty;
 mod prompt;
 mod redirect;
+mod safety;
 mod shell;
 mod suggest;
 mod theme;
@@ -64,6 +69,9 @@ fn main() -> Result<()> {
         }
         CliMode::Script(path, script_args) => {
             return run_script(&path, &script_args);
+        }
+        CliMode::Check(paths) => {
+            std::process::exit(check::run(&paths));
         }
         CliMode::UpdateRefresh => {
             update::refresh_blocking();
@@ -113,15 +121,28 @@ fn main() -> Result<()> {
     // Ctrl-X Ctrl-E: sửa dòng đang gõ trong $EDITOR rồi chạy (như bash).
     rl.bind_sequence(
         rustyline::Event::KeySeq(vec![rustyline::KeyEvent::ctrl('X'), rustyline::KeyEvent::ctrl('E')]),
-        rustyline::EventHandler::Conditional(Box::new(EditInEditor)),
+        rustyline::EventHandler::Conditional(Box::new(PromptAction::Edit)),
+    );
+    // Ctrl-R: tìm lịch sử kiểu fuzzy (thay tìm kiếm tuần tự của readline).
+    rl.bind_sequence(
+        rustyline::KeyEvent::ctrl('R'),
+        rustyline::EventHandler::Conditional(Box::new(PromptAction::Search)),
     );
     if shell.borrow().ui.edit_mode == "vi" {
         use rustyline::config::Configurer;
         rl.set_edit_mode(rustyline::EditMode::Vi);
     }
 
-    let history_path = shell.borrow().history_path();
-    let _ = rl.load_history(&history_path);
+    // Lịch sử: kho JSONL có metadata, chia sẻ giữa các phiên. rustyline chỉ giữ
+    // bản trong bộ nhớ cho ↑ / ↓ — không tự ghi file nữa.
+    let (mut store, loaded) = {
+        let sh = shell.borrow();
+        histstore::Store::open(sh.history_store_path(), &sh.history_path(), history_size)
+    };
+    for e in &loaded {
+        let _ = rl.add_history_entry(e.cmd.as_str());
+    }
+    shell.borrow_mut().history = loaded;
 
     print_welcome(&shell);
 
@@ -130,18 +151,32 @@ fn main() -> Result<()> {
     update::startup_check(&shell);
 
     let mut first_prompt = true;
+    // Lệnh chọn từ Ctrl-R — đặt sẵn lên prompt kế tiếp để sửa / Enter.
+    let mut initial: Option<String> = None;
     loop {
         if first_prompt {
             first_prompt = false;
-        } else {
+        } else if initial.is_none() {
             print_block_separator(&shell.borrow());
         }
+        // Lệnh các phiên khác vừa chạy: luôn vào `history` / Ctrl-R; vào ↑ khi share.
+        let share = shell.borrow().history_cfg.share;
+        for e in store.poll() {
+            if share {
+                let _ = rl.add_history_entry(e.cmd.as_str());
+            }
+            shell.borrow_mut().history.push(e);
+        }
+
         let prompt_str = prompt::render(&shell.borrow());
-        let readline = match rl.readline(&prompt_str) {
-            // Ctrl-X Ctrl-E đã lưu dòng đang gõ → mở editor, chạy nội dung sau khi sửa.
-            Err(ReadlineError::Interrupted) if EDIT_BUFFER.lock().map(|b| b.is_some()).unwrap_or(false) => {
-                let text = EDIT_BUFFER.lock().ok().and_then(|mut b| b.take()).unwrap_or_default();
-                match builtins::edit_in_editor(&shell, &text) {
+        let raw = match initial.take() {
+            Some(text) => rl.readline_with_initial(&prompt_str, (&text, "")),
+            None => rl.readline(&prompt_str),
+        };
+        let readline = match raw {
+            Err(ReadlineError::Interrupted) => match take_prompt_action() {
+                // Ctrl-X Ctrl-E: mở editor, chạy nội dung sau khi sửa.
+                Some((PromptAction::Edit, text)) => match builtins::edit_in_editor(&shell, &text) {
                     Ok(Some(edited)) if !edited.trim().is_empty() => {
                         println!("{}", edited);
                         Ok(edited)
@@ -151,8 +186,19 @@ fn main() -> Result<()> {
                         eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
                         continue;
                     }
+                },
+                // Ctrl-R: chọn lệnh rồi đặt lên prompt (chưa chạy).
+                Some((PromptAction::Search, query)) => {
+                    let (cwd, color) = {
+                        let sh = shell.borrow();
+                        (sh.cwd.display().to_string(), sh.theme.use_color)
+                    };
+                    let picked = fuzzy::pick(&shell.borrow().history, &query, &cwd, color);
+                    initial = Some(picked.unwrap_or(query));
+                    continue;
                 }
-            }
+                None => Err(ReadlineError::Interrupted),
+            },
             other => other,
         };
         match readline {
@@ -179,35 +225,25 @@ fn main() -> Result<()> {
                     }
                 };
                 // Paste nhiều dòng: mỗi lệnh 1 entry (gọn cho ↑ / Ctrl-R), còn
-                // dòng nối bằng `\` gộp lại thành 1 entry chạy được.
+                // dòng nối bằng `\` / khối nhiều dòng gộp thành 1 entry.
+                let cwd = shell.borrow().cwd.display().to_string();
                 let filter = shell.borrow().history_cfg.secret_filter;
+                let mut pending: Vec<histstore::Entry> = Vec::new();
                 for entry in history::entries(&line) {
                     match history::secret_kind(&entry).filter(|_| filter) {
                         Some(kind) => eprintln!(
                             "\x1b[33m🔒 Lệnh chứa {kind} — không lưu vào lịch sử.\x1b[0m \x1b[2m(tắt: [history] secret_filter = false)\x1b[0m"
                         ),
+                        // Dấu cách đầu dòng = không lưu (như HISTCONTROL=ignorespace).
+                        None if line.starts_with(' ') => {}
                         None => {
-                            rl.add_history_entry(entry).ok();
+                            rl.add_history_entry(entry.as_str()).ok();
+                            pending.push(histstore::Entry::new(&entry, &cwd));
                         }
                     }
                 }
-                // Lưu tăng dần ra đĩa: lịch sử sống sót cả khi shell bị kill chứ
-                // không chỉ khi thoát sạch. append chỉ ghi entry mới (no-op rẻ
-                // khi không có gì mới) nên save lúc thoát cũng thành no-op, không
-                // ghi trùng.
-                let _ = rl.append_history(&history_path);
-                // Đồng bộ shell.history = bản sao CHÍNH XÁC vòng lịch sử của
-                // rustyline (đã nạp từ file + bỏ trùng liên tiếp + giới hạn kích
-                // thước) — builtin `history` nhờ đó luôn khớp với ↑ / Ctrl-R và
-                // file trên đĩa, không phình vô hạn rồi lệch khỏi những gì thực sự
-                // gọi lại được sau >100 lệnh.
-                {
-                    let mut sh = shell.borrow_mut();
-                    sh.history.clear();
-                    for entry in rl.history().iter() {
-                        sh.history.push(entry.clone());
-                    }
-                }
+                // Có ngay trong `history` khi lệnh đang chạy (như bash).
+                shell.borrow_mut().history.extend(pending.iter().cloned());
 
                 // Báo job nền đã xong / bị dừng trong lúc chờ ở prompt (bash in
                 // trước khi chạy lệnh kế tiếp).
@@ -217,61 +253,96 @@ fn main() -> Result<()> {
                 }
                 jobctl::take_interrupted();
 
+                // Lệnh nguy hiểm (`rm -rf /`, `chmod -R 777 /`…): hỏi trước khi chạy.
+                if shell.borrow().ui.confirm_dangerous {
+                    if let Some(reason) = safety::danger(&line) {
+                        eprintln!("\x1b[1;31m⚠ Lệnh nguy hiểm: {reason}\x1b[0m");
+                        let answer = rl.readline("\x1b[33m  Vẫn chạy? [y/N] \x1b[0m").unwrap_or_default();
+                        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "có" | "co") {
+                            eprintln!("\x1b[2m  Đã huỷ. (tắt hỏi: [ui] confirm_dangerous = false)\x1b[0m");
+                            shell.borrow_mut().set_last_status(1);
+                            continue;
+                        }
+                    }
+                }
+
                 let started = Instant::now();
                 let result = run_line(&shell, &line);
                 let elapsed = started.elapsed();
+                let code = match &result {
+                    Ok(code) => *code,
+                    Err(_) => 1,
+                };
 
+                // Ghi lịch sử kèm exit code + thời lượng (trừ khi lệnh vừa xoá lịch sử).
+                let cleared = shell.borrow().history_clear_requested;
+                if !cleared {
+                    let ms = elapsed.as_millis() as u64;
+                    let mut sh = shell.borrow_mut();
+                    for mut e in pending {
+                        e.code = Some(code);
+                        e.ms = Some(ms);
+                        store.append(&e);
+                        if let Some(slot) =
+                            sh.history.iter_mut().rev().find(|h| h.cmd == e.cmd && h.ts == e.ts && h.code.is_none())
+                        {
+                            *slot = e;
+                        }
+                    }
+                }
+
+                let mut rewrite = false;
                 // `history --scrub`: lọc lại toàn bộ lịch sử, ghi đè file.
                 if std::mem::take(&mut shell.borrow_mut().history_scrub_requested) {
-                    let all: Vec<String> = rl.history().iter().cloned().collect();
-                    let kept: Vec<String> = all.iter().filter(|e| history::secret_kind(e).is_none()).cloned().collect();
-                    let removed = all.len() - kept.len();
-                    let _ = rl.clear_history();
-                    for e in &kept {
-                        let _ = rl.add_history_entry(e.as_str());
-                    }
-                    let _ = std::fs::write(&history_path, "");
-                    let _ = rl.save_history(&history_path);
-                    shell.borrow_mut().history = kept;
+                    let mut sh = shell.borrow_mut();
+                    let before = sh.history.len();
+                    sh.history.retain(|e| history::secret_kind(&e.cmd).is_none());
+                    let removed = before - sh.history.len();
+                    rewrite = true;
                     println!("🔒 Đã xoá {removed} lệnh chứa token/mật khẩu khỏi lịch sử.");
                     if removed > 0 {
                         println!("\x1b[33m   Lưu ý: token đã từng nằm trong file — nên thu hồi (revoke) chúng.\x1b[0m");
                     }
                 }
-                // `history -d N`: dựng lại lịch sử không có entry đó.
-                // Lấy ra biến riêng: `if let` giữ RefMut tạm suốt cả khối → borrow lồng panic.
+                // `history -d N`. Lấy ra biến riêng: `if let` giữ RefMut tạm suốt
+                // cả khối → borrow lồng panic.
                 let delete_request = shell.borrow_mut().history_delete_request.take();
                 if let Some(idx) = delete_request {
-                    let mut all: Vec<String> = rl.history().iter().cloned().collect();
-                    if idx < all.len() {
-                        all.remove(idx);
+                    let mut sh = shell.borrow_mut();
+                    if idx < sh.history.len() {
+                        sh.history.remove(idx);
                     }
+                    rewrite = true;
+                }
+                // `history -c`.
+                if std::mem::take(&mut shell.borrow_mut().history_clear_requested) {
+                    shell.borrow_mut().history.clear();
+                    rewrite = true;
+                }
+                if rewrite {
+                    store.rewrite(&shell.borrow().history);
                     let _ = rl.clear_history();
-                    for e in &all {
-                        let _ = rl.add_history_entry(e.as_str());
+                    for e in shell.borrow().history.iter() {
+                        let _ = rl.add_history_entry(e.cmd.as_str());
                     }
-                    let _ = std::fs::write(&history_path, "");
-                    let _ = rl.save_history(&history_path);
-                    shell.borrow_mut().history = all;
                 }
                 // Lệnh `fc` vừa chạy được ghi vào lịch sử.
                 let added = std::mem::take(&mut shell.borrow_mut().history_add_request);
-                for e in added {
-                    let _ = rl.add_history_entry(e.as_str());
-                    let _ = rl.append_history(&history_path);
+                for cmd in added {
+                    if history::secret_kind(&cmd).is_some() && filter {
+                        continue;
+                    }
+                    let _ = rl.add_history_entry(cmd.as_str());
+                    let mut e = histstore::Entry::new(&cmd, &cwd);
+                    e.code = Some(code);
+                    store.append(&e);
+                    shell.borrow_mut().history.push(e);
                 }
                 // `set -o vi` / `set -o emacs`.
                 let mode_request = shell.borrow_mut().edit_mode_request.take();
                 if let Some(mode) = mode_request {
                     use rustyline::config::Configurer;
                     rl.set_edit_mode(if mode == "vi" { rustyline::EditMode::Vi } else { rustyline::EditMode::Emacs });
-                }
-                // `history -c`: builtin không chạm được rustyline nên chỉ bật cờ.
-                if std::mem::take(&mut shell.borrow_mut().history_clear_requested) {
-                    // save_history là no-op khi không có entry mới → tự cắt file.
-                    let _ = rl.clear_history();
-                    let _ = std::fs::write(&history_path, "");
-                    shell.borrow_mut().history.clear();
                 }
 
                 let code = match result {
@@ -311,18 +382,29 @@ fn main() -> Result<()> {
         }
     }
 
-    let _ = rl.save_history(&history_path);
     executor::run_exit_trap(&shell);
     jobctl::shutdown(&shell);
     Ok(())
 }
 
-/// Dòng đang gõ khi nhấn Ctrl-X Ctrl-E (handler của rustyline phải Send + Sync).
-static EDIT_BUFFER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Phím đặc biệt ở prompt: lưu dòng đang gõ rồi thoát readline (Interrupt) để
+/// vòng lặp chính làm tiếp — handler của rustyline phải Send + Sync.
+#[derive(Clone, Copy)]
+enum PromptAction {
+    /// Ctrl-X Ctrl-E
+    Edit,
+    /// Ctrl-R
+    Search,
+}
 
-struct EditInEditor;
+static PROMPT_ACTION: std::sync::Mutex<Option<(u8, String)>> = std::sync::Mutex::new(None);
 
-impl rustyline::ConditionalEventHandler for EditInEditor {
+fn take_prompt_action() -> Option<(PromptAction, String)> {
+    let (kind, text) = PROMPT_ACTION.lock().ok()?.take()?;
+    Some((if kind == 0 { PromptAction::Edit } else { PromptAction::Search }, text))
+}
+
+impl rustyline::ConditionalEventHandler for PromptAction {
     fn handle(
         &self,
         _evt: &rustyline::Event,
@@ -330,10 +412,13 @@ impl rustyline::ConditionalEventHandler for EditInEditor {
         _positive: bool,
         ctx: &rustyline::EventContext,
     ) -> Option<rustyline::Cmd> {
-        if let Ok(mut b) = EDIT_BUFFER.lock() {
-            *b = Some(ctx.line().to_string());
+        if let Ok(mut slot) = PROMPT_ACTION.lock() {
+            let kind = match self {
+                PromptAction::Edit => 0,
+                PromptAction::Search => 1,
+            };
+            *slot = Some((kind, ctx.line().to_string()));
         }
-        // Thoát readline; vòng lặp chính thấy EDIT_BUFFER và mở editor.
         Some(rustyline::Cmd::Interrupt)
     }
 }
@@ -589,6 +674,8 @@ enum CliMode {
     Script(String, Vec<String>),
     Help,
     Version,
+    /// `--check` / `-n` — kiểm tra cú pháp script, không chạy.
+    Check(Vec<String>),
     /// `--update-refresh` (nội bộ) — tiến trình nền: gọi mạng lấy tag mới nhất,
     /// ghi cache rồi thoát. Không banner, không REPL.
     UpdateRefresh,
@@ -612,6 +699,7 @@ fn parse_cli(args: &[String]) -> CliMode {
             "-V" | "--version" => return CliMode::Version,
             "-h" | "--help" => return CliMode::Help,
             "--update-refresh" => return CliMode::UpdateRefresh,
+            "--check" | "-n" => return CliMode::Check(args[i + 1..].to_vec()),
             "--" => {
                 if let Some((path, rest)) = args[i + 1..].split_first() {
                     return CliMode::Script(path.clone(), rest.to_vec());
@@ -641,7 +729,8 @@ fn print_cli_help() {
     println!("USAGE:");
     println!("  jaksh                          REPL tương tác (mặc định)");
     println!("  jaksh -c \"<lệnh>\"              chạy 1 lệnh rồi exit");
-    println!("  jaksh <script.sh> [args...]    chạy script từng dòng rồi exit");
+    println!("  jaksh <script.sh> [args...]    chạy script rồi exit");
+    println!("  jaksh --check <script.sh>...   kiểm tra cú pháp (báo số dòng), không chạy  (= -n)");
     println!();
     println!("OPTIONS:");
     println!("  -c <cmd>           Chạy <cmd> qua lexer/parser rồi exit");

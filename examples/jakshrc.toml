@@ -26,6 +26,11 @@ separator = "none"
 pretty_curl = true
 # Chế độ soạn dòng: "emacs" (mặc định) hoặc "vi". Đổi tạm: `set -o vi`.
 edit_mode = "emacs"
+# Tô màu cú pháp khi gõ: lệnh sai đỏ, đúng xanh, chuỗi, biến, đường dẫn có thật.
+syntax_highlight = true
+# Hỏi xác nhận trước lệnh nguy hiểm (rm -rf /, chmod -R 777 /, dd of=/dev/sda,
+# git push --force lên main, fork bomb…).
+confirm_dangerous = true
 
 [history]
 # Số lệnh tối đa giữ trong lịch sử (như HISTSIZE của bash).
@@ -33,6 +38,9 @@ size = 10000
 # Không lưu lệnh chứa token / mật khẩu (GitHub/AWS/API key, Authorization:,
 # user:pass@…) vào lịch sử. `history --scrub` dọn những lệnh đã lỡ lưu.
 secret_filter = true
+# true = phím ↑ thấy cả lệnh vừa gõ ở tab khác (như zsh SHARE_HISTORY).
+# `history` và Ctrl-R luôn thấy lệnh của mọi tab.
+share = false
 
 [timing]
 # Hiển thị thời gian thực thi sau mỗi lệnh

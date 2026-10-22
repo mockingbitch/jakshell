@@ -29,11 +29,18 @@ const ICON_GIT_TAG:    &str = "🏷 ";  // git tag
 #[derive(DeriveHelper)]
 pub struct ShellHelper {
     shell: Rc<RefCell<Shell>>,
+    /// Cache tra `$PATH` cho tô màu cú pháp (gõ phím nào cũng tô lại cả dòng).
+    commands: RefCell<crate::highlight::CommandCache>,
 }
 
 impl ShellHelper {
     pub fn new(shell: Rc<RefCell<Shell>>) -> Self {
-        Self { shell }
+        Self { shell, commands: RefCell::new(Default::default()) }
+    }
+
+    fn highlighting(&self) -> bool {
+        let sh = self.shell.borrow();
+        sh.ui.syntax_highlight && sh.theme.use_color
     }
 }
 
@@ -240,6 +247,18 @@ impl Highlighter for ShellHelper {
     }
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
         Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
+    }
+
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if !self.highlighting() || line.is_empty() {
+            return Cow::Borrowed(line);
+        }
+        Cow::Owned(crate::highlight::highlight(line, &self.shell.borrow(), &self.commands))
+    }
+
+    /// Tô lại cả dòng sau mỗi phím (màu của lệnh đổi khi gõ thêm ký tự).
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+        self.highlighting()
     }
 }
 

@@ -50,6 +50,9 @@ Gõ ? hoặc help bất cứ lúc nào.
 - **Viết script như bash** — `if/elif/else`, `for … in`, `for ((;;))`, `while/until`, `case` (`;;` `;&` `;;&`), function + `local`/`return`, `break/continue N`, `{ }` / `( )` subshell, `[[ … ]]` (glob, `=~` + `BASH_REMATCH`), `$(( ))` / `(( ))` / `let`, `${x:-…}` `${#x}` `${x##*/}` `${x//a/b}` `${x:1:3}` `${x^^}`…, brace `{a,b}` `{1..10}`, mảng `a=(…)` / `declare -A`, `read -a`, `mapfile`, `getopts`, `printf`, process substitution `<(…)`, tách từ theo `$IFS`. Chạy được script bash thật (đối chiếu tự động với bash: 207/215 case).
 - **Gõ lệnh nhiều dòng** — `for`/`if`/function/nháy/here-doc chưa xong thì Enter xuống dòng chờ gõ tiếp; cả khối lưu thành 1 entry lịch sử.
 - **`trap`** — `EXIT`, `ERR`, `INT`/`TERM`/`HUP`/`USR1`…, `trap '' SIG` bỏ qua, `trap - SIG`, `trap -p`. Cộng `pushd`/`popd`/`dirs`, `cd -P` / `CDPATH`, `umask` (cả dạng `u=rwx,g=rx`), `ulimit`, `times`.
+- **✨ Vượt bash khi gõ lệnh** — tô màu cú pháp tức thì (lệnh sai **đỏ**, đúng **xanh**, chuỗi, biến, đường dẫn có thật gạch chân); **Ctrl-R tìm fuzzy** (`gpom` → `git push origin main`) ưu tiên lệnh từng chạy ở thư mục hiện tại; **hỏi xác nhận lệnh nguy hiểm** (`rm -rf /`, `chmod -R 777 /`, `dd of=/dev/sda`, `git push -f` lên `main`, fork bomb…).
+- **Lịch sử có trí nhớ** — mỗi lệnh lưu kèm thời điểm, thư mục, exit code, thời lượng; chia sẻ ngay giữa các tab; `history --long` / `--here` / `--failed`, `HISTTIMEFORMAT`.
+- **`jaksh --check script.sh`** (= `-n`) — kiểm tra cú pháp không chạy, báo **số dòng**, cảnh báo cú pháp bash chưa hỗ trợ. Script lỗi cú pháp cũng báo đúng dòng và dừng như bash.
 - **Sửa lệnh trong editor** — **Ctrl-X Ctrl-E** mở dòng đang gõ trong `$EDITOR`; `fc` (sửa lệnh cũ), `fc -s cũ=mới`, `fc -l`, `history -d N`; `set -o vi` / `[ui] edit_mode = "vi"`; Tab hoàn thành `$BIẾN`.
 - **Job control như bash** — Ctrl-C chỉ dừng lệnh đang chạy, **không bao giờ giết shell**; Ctrl-Z tạm dừng → `fg` / `bg` / `jobs` / `kill %1` / `wait` / `disown`.
 - **🔒 Lịch sử an toàn** — lệnh chứa token / mật khẩu (GitHub, AWS, API key, `Authorization:`, `user:pass@`…) **không được lưu** vào lịch sử; `history --scrub` dọn những thứ đã lỡ lưu.
@@ -559,10 +562,13 @@ use_color = true
 blank_line = true           # dòng trống giữa các khối lệnh (dễ nhìn lại output cũ)
 separator = "none"          # "line" = thêm đường kẻ mờ ngang giữa các khối
 pretty_curl = true          # curl ra terminal: dòng HTTP status + JSON đẹp (false = như bash)
+syntax_highlight = true     # tô màu cú pháp khi gõ
+confirm_dangerous = true    # hỏi trước lệnh nguy hiểm (rm -rf /, chmod -R 777 /…)
 
 [history]
 size = 10000                # số lệnh tối đa giữ lại (như HISTSIZE)
 secret_filter = true        # không lưu lệnh chứa token / mật khẩu
+share = false               # true = ↑ thấy cả lệnh vừa gõ ở tab khác (như zsh SHARE_HISTORY)
 
 [timing]
 enabled = true
@@ -632,7 +638,8 @@ alias ..="cd .."        # nháy kép bắt buộc khi value > 1 từ
 |-----------|----------|
 | `~/.jakshrc.toml` | Cấu hình chính (theme, prompt, ui, alias, env, timing, greeting) |
 | `~/.jakshrc` | Script khởi động (chạy mỗi khi mở shell) |
-| `~/.config/jaksh/history` | Lịch sử lệnh |
+| `~/.config/jaksh/history.jsonl` | Lịch sử lệnh (kèm thời điểm, thư mục, exit code, thời lượng — chia sẻ giữa các tab) |
+| `~/.config/jaksh/history` | Lịch sử định dạng cũ — chỉ được đọc 1 lần để nhập sang `history.jsonl` |
 | `~/.config/jaksh/bookmarks.toml` | Bookmark do `bookmark` quản lý |
 | `~/.config/jaksh/news-cache.json` | Cache tin tức của `jak news` (có TTL) |
 
@@ -740,6 +747,11 @@ JakShell/
     ├── config.rs        # ~/.jakshrc.toml + ~/.jakshrc loader
     ├── completion.rs    # Tab completion (rustyline helper)
     ├── history.rs       # !! / !$ / !N, gộp dòng nối `\`, lọc secret
+    ├── histstore.rs     # Kho lịch sử JSONL có metadata, chia sẻ giữa các tab
+    ├── fuzzy.rs         # Ctrl-R tìm fuzzy
+    ├── highlight.rs     # Tô màu cú pháp khi gõ
+    ├── safety.rs        # Nhận diện lệnh nguy hiểm
+    ├── check.rs         # jaksh --check: lỗi cú pháp kèm số dòng
     ├── suggest.rs       # Did-you-mean
     ├── explain.rs       # 70+ command explanations + live annotators
     ├── pretty.rs        # --jak prettifier (ls/ps/df/du/git)

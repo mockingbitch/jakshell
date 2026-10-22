@@ -22,7 +22,8 @@
 | Job control | 54/160 | 30/30 |
 | Đợt 1 xong | 94/160 | 30/30 |
 | Đợt 2 xong | 152/160 (+55 case nâng cao: 207/215) | 30/30 |
-| **Đợt 3–4 xong** | **233/235** (2 khác biệt có chủ ý) | **31/31**, REPL **7/7** |
+| Đợt 3–4 xong | 233/235 (2 khác biệt có chủ ý) | 31/31, REPL 7/7 |
+| **Đợt 5 xong** | **233/235** | **31/31**, REPL **7/7**, lịch sử/fuzzy **13/13** |
 
 **Đợt 1 đã làm:**
 - **Job control đầy đủ:** process group riêng; Ctrl-C/Ctrl-Z/Ctrl-\ không bao giờ giết hay treo shell; `fg`/`bg`/`jobs -l`/`wait`/`disown`/`kill %N`; khôi phục chế độ terminal; cảnh báo khi thoát còn job dừng.
@@ -58,7 +59,15 @@
 
 **Khác biệt có chủ ý còn lại:** alias hoạt động cả trong script / `-c`; `ls` có alias mặc định (`type -t ls` → `alias`).
 
-**Còn lại (Đợt 5 — vượt bash):** tô màu cú pháp khi gõ, Ctrl-R fuzzy + ưu tiên theo thư mục, lịch sử chia sẻ giữa các phiên kèm timestamp / cwd / exit code, cảnh báo lệnh nguy hiểm, `jaksh --check script.sh`. Ngoài ra: `$LINENO` chính xác, lỗi cú pháp kèm số dòng, `declare -f` in thân function, trap `DEBUG` / `RETURN` (hiện chỉ nhận, chưa chạy).
+**Đợt 5 (vượt bash) đã làm:**
+- **Tô màu cú pháp khi gõ:** lệnh có thật xanh / không tồn tại đỏ (cache tra `$PATH`), từ khoá, chuỗi, biến / `$(…)`, toán tử, comment, tuỳ chọn `-x`, đường dẫn có thật gạch chân. Dễ dãi với dòng gõ dở; chỉ thêm mã ANSI, không đổi text (có test). Tắt: `[ui] syntax_highlight = false`.
+- **Kho lịch sử JSONL** (`history.jsonl`): mỗi lệnh kèm thời điểm, thư mục, exit code, thời lượng, phiên; tự nhập lịch sử cũ; ghi `O_APPEND` an toàn khi nhiều tab; mỗi prompt đọc thêm lệnh tab khác vừa chạy (`history` / Ctrl-R luôn thấy; ↑ thấy khi `[history] share = true`). `history --long` (✓/✗ code, thời lượng, thư mục), `--here`, `--failed`, `HISTTIMEFORMAT`.
+- **Ctrl-R fuzzy:** khớp liền mạch > khớp rời, thưởng đầu từ / liên tiếp, độ mới, lệnh ở thư mục hiện tại, lệnh thành công; mỗi lệnh 1 lần; Enter đưa lên prompt để sửa trước khi chạy.
+- **Xác nhận lệnh nguy hiểm:** `rm -r` trên `/`, `~`, `$HOME`, thư mục hệ thống; `--no-preserve-root`; `chmod/chown -R` trên `/`; `mkfs*`, `wipefs`, `dd of=/dev/…`, `> /dev/sda`; `git push -f` / `+nhánh` lên main/master/prod/release; `git clean -fdx`; `kill -9 -1`; fork bomb. Bỏ qua tiền tố `sudo -u x`, `env`, `VAR=`. Không báo nhầm `rm -rf ./build`, `echo 'rm -rf /'` (có test).
+- **`jaksh --check` / `-n`:** lỗi cú pháp kèm số dòng (nháy chưa đóng → đúng dòng mở nháy), cảnh báo `select`, `coproc`, extglob, nameref, trap DEBUG/RETURN; định dạng `file:dòng:`; exit 0/1/2.
+- **Script lỗi cú pháp:** chạy các khối hợp lệ trước lỗi rồi dừng với exit 2, báo đúng dòng — như bash (trước đây chạy tiếp từng dòng, có thể nguy hiểm). `.jakshrc` vẫn bỏ qua khối lỗi và chạy tiếp. `$LINENO` = dòng đầu khối khi chạy theo khối.
+
+**Còn lại (ý tưởng tiếp theo):** tô màu cú pháp khi gõ, Ctrl-R fuzzy + ưu tiên theo thư mục, lịch sử chia sẻ giữa các phiên kèm timestamp / cwd / exit code, cảnh báo lệnh nguy hiểm, `jaksh --check script.sh`. Ngoài ra: `$LINENO` chính xác, lỗi cú pháp kèm số dòng, `declare -f` in thân function, trap `DEBUG` / `RETURN` (hiện chỉ nhận, chưa chạy).
 
 **Còn lại trước đó:** Đợt 3 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
 

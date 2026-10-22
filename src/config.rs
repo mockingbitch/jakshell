@@ -72,7 +72,7 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
     let script_path = shell.borrow().rc_script_path();
     if script_path.exists() {
         let content = std::fs::read_to_string(&script_path)?;
-        run_script(shell, &content)?;
+        run_rc(shell, &content)?;
     }
 
     // Theme đã lưu qua `jak theme <name>` được áp CUỐI cùng (last-wins).
@@ -87,32 +87,45 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
     Ok(())
 }
 
-/// Chạy nội dung script (`.jakshrc`, `source`, file script). Parse CẢ FILE một
-/// lượt để chuỗi / here-doc nhiều dòng hoạt động; nếu file có lỗi cú pháp thì
-/// báo lỗi rồi rơi về chạy từng dòng — một dòng hỏng không chặn cả `.jakshrc`.
-/// Trả về exit code của lệnh cuối.
+/// Chạy nội dung script (`source`, file script, stdin). Lỗi cú pháp: chạy các
+/// khối lệnh hợp lệ TRƯỚC chỗ lỗi rồi dừng với exit 2 — như bash (chạy tiếp
+/// phần sau có thể nguy hiểm, vd `if` bảo vệ `rm` bị hỏng).
 pub fn run_script(shell: &Rc<RefCell<Shell>>, content: &str) -> Result<i32> {
-    let content = content.strip_prefix("#!").map_or(content, |rest| rest.split_once('\n').map_or("", |(_, r)| r));
-    let whole = crate::lexer::tokenize(content).and_then(|t| crate::parser::parse(&t));
-    match whole {
-        Ok(ast) => crate::executor::execute(shell, &ast),
-        Err(first_err) => {
-            eprintln!("jaksh: lỗi cú pháp: {first_err} — chạy từng dòng thay thế");
-            let mut code = 0;
-            for (n, raw) in content.lines().enumerate() {
-                let line = raw.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                match crate::lexer::tokenize(line).and_then(|t| crate::parser::parse(&t)) {
-                    Ok(ast) => code = crate::executor::execute(shell, &ast).unwrap_or(1),
-                    Err(e) => {
-                        eprintln!("jaksh: dòng {}: {}", n + 1, e);
-                        code = 2;
-                    }
+    run_source(shell, content, false)
+}
+
+/// `.jakshrc`: khối lỗi được bỏ qua, các khối sau vẫn chạy — 1 dòng sai không
+/// làm mất cả cấu hình.
+fn run_rc(shell: &Rc<RefCell<Shell>>, content: &str) -> Result<i32> {
+    run_source(shell, content, true)
+}
+
+fn run_source(shell: &Rc<RefCell<Shell>>, content: &str, tolerant: bool) -> Result<i32> {
+    let content = crate::check::blank_shebang(content);
+    // Đường nhanh: cả file hợp lệ → parse 1 lượt.
+    if let Ok(ast) = crate::lexer::tokenize(&content).and_then(|t| crate::parser::parse(&t)) {
+        return crate::executor::execute(shell, &ast);
+    }
+    let mut code = 0;
+    for block in crate::check::blocks(&content) {
+        match block {
+            crate::check::Block::Code(line, text) => {
+                shell.borrow_mut().env.insert("LINENO".into(), line.to_string());
+                let ast = crate::lexer::tokenize(&text).and_then(|t| crate::parser::parse(&t))?;
+                code = crate::executor::execute(shell, &ast)?;
+                if shell.borrow().flow != crate::shell::Flow::Normal {
+                    break;
                 }
             }
-            Ok(code)
+            crate::check::Block::Error(line, msg) => {
+                eprintln!("jaksh: dòng {}: lỗi cú pháp: {}", line, msg);
+                if !tolerant {
+                    return Ok(2);
+                }
+                code = 2;
+            }
         }
     }
+    shell.borrow_mut().env.remove("LINENO");
+    Ok(code)
 }

@@ -56,7 +56,7 @@ pub struct Shell {
     /// bỏ trùng liên tiếp + giới hạn kích thước). Là nguồn dữ liệu cho builtin
     /// `history` — cập nhật theo thời gian thực, KHÔNG đọc lại file (file chỉ
     /// được ghi khi thoát/append) nên không còn hiện ảnh chụp cũ.
-    pub history: Vec<String>,
+    pub history: Vec<crate::histstore::Entry>,
     /// `history -c` bật cờ này; vòng lặp chính (nơi giữ rustyline) xoá lịch
     /// sử thật + file rồi tắt cờ.
     pub history_clear_requested: bool,
@@ -233,6 +233,10 @@ pub struct UiConfig {
     pub pretty_curl: bool,
     /// Chế độ soạn dòng: "emacs" (mặc định) hoặc "vi".
     pub edit_mode: String,
+    /// Tô màu cú pháp khi gõ (lệnh sai đỏ, đúng xanh, chuỗi, biến…).
+    pub syntax_highlight: bool,
+    /// Hỏi xác nhận trước lệnh nguy hiểm (`rm -rf /`, `chmod -R 777 /`…).
+    pub confirm_dangerous: bool,
 }
 
 impl Default for UiConfig {
@@ -242,6 +246,8 @@ impl Default for UiConfig {
             separator: "none".into(),
             pretty_curl: true,
             edit_mode: "emacs".into(),
+            syntax_highlight: true,
+            confirm_dangerous: true,
         }
     }
 }
@@ -253,11 +259,14 @@ pub struct HistoryConfig {
     pub size: usize,
     /// Không lưu lệnh chứa token / mật khẩu vào lịch sử (cảnh báo 1 dòng).
     pub secret_filter: bool,
+    /// ↑ / ↓ thấy cả lệnh vừa gõ ở tab khác (như `setopt SHARE_HISTORY` của zsh).
+    /// `history` và Ctrl-R luôn thấy lệnh của mọi tab.
+    pub share: bool,
 }
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        Self { size: 10_000, secret_filter: true }
+        Self { size: 10_000, secret_filter: true, share: false }
     }
 }
 
@@ -494,8 +503,14 @@ impl Shell {
         self.env.insert("?".into(), code.to_string());
     }
 
+    /// File lịch sử cũ (rustyline `#V2`) — chỉ để nhập lần đầu.
     pub fn history_path(&self) -> PathBuf {
         self.config_dir.join("history")
+    }
+
+    /// Kho lịch sử có metadata (JSONL, chia sẻ giữa các phiên).
+    pub fn history_store_path(&self) -> PathBuf {
+        self.config_dir.join("history.jsonl")
     }
 
     pub fn rc_toml_path(&self) -> PathBuf {

@@ -1053,7 +1053,7 @@ fn fc(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     // Lệnh `fc` vừa gõ là entry cuối — bỏ ra như bash.
     let hist: Vec<String> = {
         let h = &shell.borrow().history;
-        h[..h.len().saturating_sub(1)].to_vec()
+        h[..h.len().saturating_sub(1)].iter().map(|e| e.cmd.clone()).collect()
     };
     // `N` (1-based), `-N` (tính từ cuối), hoặc tiền tố lệnh → vị trí 0-based.
     let find = |spec: Option<&str>| -> Option<usize> {
@@ -1128,11 +1128,13 @@ fn fc(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
 }
 
 fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    // Đọc từ lịch sử trong bộ nhớ của phiên (cập nhật theo thời gian thực),
-    // KHÔNG đọc file: file chỉ phản ánh lần thoát trước nên sẽ cũ, và còn ở
-    // định dạng `#V2` (có header + escape `\n`) không hợp để in trực tiếp.
+    // Đọc từ lịch sử trong bộ nhớ của phiên (gồm cả lệnh các tab khác vừa
+    // chạy), không đọc file trực tiếp.
+    let mut limit: Option<usize> = None;
+    let mut here = false;
+    let mut failed = false;
+    let mut long = false;
     match args {
-        [] => {}
         ["-c"] => {
             let mut sh = shell.borrow_mut();
             sh.history.clear();
@@ -1154,14 +1156,57 @@ fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             shell.borrow_mut().history_delete_request = Some(idx as usize);
             return Ok(0);
         }
-        [n] if n.parse::<usize>().is_ok() => {}
-        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c | history -d N | history --scrub")),
+        _ => {
+            for a in args {
+                match *a {
+                    "--here" => here = true,
+                    "--failed" => failed = true,
+                    "--long" | "-l" => long = true,
+                    n if n.parse::<usize>().is_ok() => limit = n.parse().ok(),
+                    _ => {
+                        return Err(anyhow!(
+                            "history: cách dùng: history [N] [--here] [--failed] [--long] | -c | -d N | --scrub"
+                        ))
+                    }
+                }
+            }
+        }
     }
     let sh = shell.borrow();
-    let total = sh.history.len();
-    let skip = args.first().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| total.saturating_sub(n));
-    for (i, line) in sh.history.iter().enumerate().skip(skip) {
-        println!("{:5}  {}", i + 1, line);
+    let cwd = sh.cwd.display().to_string();
+    let timefmt = sh.get_var("HISTTIMEFORMAT").filter(|f| !f.is_empty());
+    let picked: Vec<(usize, &crate::histstore::Entry)> = sh
+        .history
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !here || e.cwd == cwd)
+        .filter(|(_, e)| !failed || e.code.is_some_and(|c| c != 0))
+        .collect();
+    let skip = limit.map_or(0, |n| picked.len().saturating_sub(n));
+    let color = sh.theme.use_color && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
+    for (i, e) in picked.into_iter().skip(skip) {
+        let mut line = format!("{:5}  ", i + 1);
+        if let Some(fmt) = &timefmt {
+            if e.ts > 0 {
+                if let Some(t) = chrono::DateTime::from_timestamp(e.ts, 0) {
+                    line.push_str(&t.with_timezone(&chrono::Local).format(fmt).to_string());
+                }
+            }
+        }
+        line.push_str(&e.cmd);
+        if long {
+            // Thư mục, exit code, thời lượng — thông tin bash không có.
+            let code = match e.code {
+                Some(0) => if color { "\x1b[32m✓\x1b[0m".to_string() } else { "ok".into() },
+                Some(c) => if color { format!("\x1b[31m✗{}\x1b[0m", c) } else { format!("exit {}", c) },
+                None => String::new(),
+            };
+            let dur = e.ms.map(|ms| if ms >= 1000 { format!("{:.1}s", ms as f64 / 1000.0) } else { format!("{}ms", ms) }).unwrap_or_default();
+            let dir = if e.cwd.is_empty() { String::new() } else { e.cwd.replace(&sh.get_var("HOME").unwrap_or_default(), "~") };
+            let meta = format!("  {} {} {}", code, dur, dir);
+            line.push_str(&if color { format!("\x1b[2m{}\x1b[0m", meta) } else { meta });
+        }
+        println!("{}", line);
     }
     Ok(0)
 }
