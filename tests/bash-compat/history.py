@@ -5,7 +5,7 @@ Ctrl-R fuzzy, xác nhận lệnh nguy hiểm, tô màu cú pháp.
     python3 history.py <jaksh>
 """
 import os, pty, re, select, sys, tempfile, time
-J = sys.argv[1]
+J = os.path.abspath(sys.argv[1])
 HOME = tempfile.mkdtemp(prefix="home-")
 os.makedirs(os.path.join(HOME, ".config/jaksh"))
 os.makedirs(os.path.join(HOME, "proj"))

@@ -5,7 +5,7 @@ set -o vi, pushd/popd.
     python3 repl.py <jaksh>
 """
 import os, pty, re, select, sys, tempfile, time
-J = sys.argv[1]
+J = os.path.abspath(sys.argv[1])
 HOME = tempfile.mkdtemp(prefix="home-")
 # "Editor" giả: sửa ORIGINAL → EDITED-BY-EDITOR trong file được mở.
 ED = os.path.join(HOME, "fake-editor.sh")
