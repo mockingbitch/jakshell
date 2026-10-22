@@ -15,6 +15,10 @@ pub struct Shell {
     /// `history` — cập nhật theo thời gian thực, KHÔNG đọc lại file (file chỉ
     /// được ghi khi thoát/append) nên không còn hiện ảnh chụp cũ.
     pub history: Vec<String>,
+    /// `history -c` bật cờ này; vòng lặp chính (nơi giữ rustyline) xoá lịch
+    /// sử thật + file rồi tắt cờ.
+    pub history_clear_requested: bool,
+    pub history_cfg: HistoryConfig,
     last_status: i32,
     config_dir: PathBuf,
     pub prompt_template: String,
@@ -34,6 +38,9 @@ pub struct UiConfig {
     /// Đường kẻ phân cách giữa các khối lệnh: "none" hoặc "line" (kẻ mờ
     /// ngang hết chiều rộng terminal).
     pub separator: String,
+    /// `curl` gõ trực tiếp ra terminal: in dòng HTTP status · content-type ·
+    /// thời gian + format JSON. false = curl chạy nguyên bản như bash.
+    pub pretty_curl: bool,
 }
 
 impl Default for UiConfig {
@@ -41,7 +48,21 @@ impl Default for UiConfig {
         Self {
             blank_line: true,
             separator: "none".into(),
+            pretty_curl: true,
         }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    /// Số lệnh tối đa giữ trong lịch sử (bộ nhớ + file), như HISTSIZE của bash.
+    pub size: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { size: 10_000 }
     }
 }
 
@@ -157,9 +178,14 @@ impl Default for NewsConfig {
 #[derive(Clone)]
 pub struct Job {
     pub id: u32,
-    pub pid: i32,
+    /// Process group của job — tín hiệu (`fg`, `bg`, `kill %N`) gửi cho cả group.
+    pub pgid: i32,
+    /// Các tiến trình trong job chưa kết thúc (pipeline có nhiều).
+    pub pids: Vec<i32>,
     pub cmd: String,
     pub state: JobState,
+    /// Chế độ terminal lúc job bị Ctrl-Z — trả lại khi `fg` (vd vim ở raw mode).
+    pub tmodes: Option<libc::termios>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -188,6 +214,8 @@ impl Shell {
             theme: Theme::default(),
             jobs: Vec::new(),
             history: Vec::new(),
+            history_clear_requested: false,
+            history_cfg: HistoryConfig::default(),
             last_status: 0,
             config_dir,
             prompt_template: default_prompt_template(),
@@ -245,37 +273,75 @@ impl Shell {
         std::env::remove_var(name);
     }
 
-    pub fn add_job(&mut self, pid: i32, cmd: String) -> u32 {
+    pub fn add_job(&mut self, pgid: i32, pids: Vec<i32>, cmd: String) -> u32 {
         let id = self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
         self.jobs.push(Job {
             id,
-            pid,
+            pgid,
+            pids,
             cmd,
             state: JobState::Running,
+            tmodes: None,
         });
         id
     }
 
-    pub fn reap_jobs(&mut self) {
-        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-        use nix::unistd::Pid;
-        let mut done_ids = Vec::new();
-        for j in &mut self.jobs {
-            if j.state != JobState::Running {
-                continue;
-            }
-            match waitpid(Pid::from_raw(j.pid), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => {
-                    j.state = JobState::Done;
-                    done_ids.push(j.id);
-                }
-                Ok(WaitStatus::Stopped(_, _)) => j.state = JobState::Stopped,
-                _ => {}
-            }
+    /// Đưa job lên làm "job hiện tại" (`%+`) — cuối danh sách.
+    pub fn touch_job(&mut self, id: u32) {
+        if let Some(pos) = self.jobs.iter().position(|j| j.id == id) {
+            let j = self.jobs.remove(pos);
+            self.jobs.push(j);
         }
-        for id in done_ids {
-            if let Some(j) = self.jobs.iter().find(|j| j.id == id) {
-                println!("\x1b[2m[{}] xong: {}\x1b[0m", j.id, j.cmd);
+    }
+
+    /// Tìm job theo spec kiểu bash: `%N`/`N`, `%%`/`%+`/rỗng = job hiện tại,
+    /// `%-` = job trước đó, `%chuỗi` = job có lệnh bắt đầu bằng chuỗi.
+    pub fn find_job(&self, spec: Option<&str>) -> Option<u32> {
+        let spec = spec.unwrap_or("%%");
+        let body = spec.strip_prefix('%').unwrap_or(spec);
+        match body {
+            "" | "%" | "+" => self.jobs.last().map(|j| j.id),
+            "-" => self.jobs.iter().rev().nth(1).or(self.jobs.last()).map(|j| j.id),
+            _ => match body.parse::<u32>() {
+                Ok(n) => self.jobs.iter().find(|j| j.id == n).map(|j| j.id),
+                Err(_) => self.jobs.iter().rev().find(|j| j.cmd.starts_with(body)).map(|j| j.id),
+            },
+        }
+    }
+
+    /// Thu dọn tiến trình nền đã xong / đổi trạng thái (không chặn) và in thông
+    /// báo kiểu bash: `[1]+ xong: cmd`, `[1]+ đã tạm dừng: cmd`.
+    pub fn reap_jobs(&mut self) {
+        for j in &mut self.jobs {
+            let mut changed_to = None;
+            j.pids.retain(|&pid| {
+                let mut st = 0;
+                let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED) };
+                if r == 0 {
+                    return true;
+                }
+                if r < 0 {
+                    // ECHILD: đã được thu ở nơi khác → coi như xong.
+                    return false;
+                }
+                if libc::WIFSTOPPED(st) {
+                    changed_to = Some(JobState::Stopped);
+                    return true;
+                }
+                if libc::WIFCONTINUED(st) {
+                    changed_to = Some(JobState::Running);
+                    return true;
+                }
+                false
+            });
+            if j.pids.is_empty() {
+                j.state = JobState::Done;
+                println!("\x1b[2m[{}]+ xong: {}\x1b[0m", j.id, j.cmd);
+            } else if let Some(state) = changed_to {
+                if state != j.state && state == JobState::Stopped {
+                    println!("\x1b[33m[{}]+ đã tạm dừng: {}\x1b[0m", j.id, j.cmd);
+                }
+                j.state = state;
             }
         }
         self.jobs.retain(|j| j.state != JobState::Done);

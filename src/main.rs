@@ -6,9 +6,11 @@ mod executor;
 mod expand;
 mod explain;
 mod findcmd;
+mod history;
 mod i18n;
 mod info;
 mod jak;
+mod jobctl;
 mod lexer;
 mod markdown;
 mod news;
@@ -67,6 +69,10 @@ fn main() -> Result<()> {
         CliMode::Interactive => {} // tiếp tục xuống REPL bên dưới
     }
 
+    // Job control: shell giữ terminal, miễn nhiễm Ctrl-C/Ctrl-Z; mỗi lệnh chạy
+    // trong process group riêng. Phải bật trước mọi thứ có thể spawn lệnh con.
+    jobctl::init();
+
     let shell = Rc::new(RefCell::new(Shell::new()?));
 
     if let Err(e) = config::load(&shell) {
@@ -76,9 +82,11 @@ fn main() -> Result<()> {
     let helper = ShellHelper::new(Rc::clone(&shell));
     // List-mode completion: Tab 1 → in danh sách candidates + complete common prefix.
     // Tab tiếp theo → cycle qua từng option.
+    let history_size = shell.borrow().history_cfg.size.max(1);
     let config = Config::builder()
         .completion_type(CompletionType::List)
         .auto_add_history(false)
+        .max_history_size(history_size)?
         .history_ignore_dups(true)?
         .history_ignore_space(true)
         .build();
@@ -109,16 +117,27 @@ fn main() -> Result<()> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                // Khi paste nhiều dòng, lưu mỗi dòng thành 1 entry lịch sử riêng
-                // (gọn cho ↑ / Ctrl-R) thay vì 1 khối có \n ở giữa.
-                if line.contains('\n') {
-                    for l in line.split('\n') {
-                        if !l.trim().is_empty() {
-                            rl.add_history_entry(l).ok();
+                // `!!`, `!$`, `!N`, … — mở rộng TRƯỚC khi lưu (như bash: lịch sử
+                // giữ lệnh đã mở rộng) và in lại dòng thật sẽ chạy.
+                let line = {
+                    let past: Vec<String> = rl.history().iter().cloned().collect();
+                    match history::expand(&line, &past) {
+                        Ok(Some(expanded)) => {
+                            println!("{}", expanded);
+                            expanded
+                        }
+                        Ok(None) => line,
+                        Err(e) => {
+                            eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
+                            shell.borrow_mut().set_last_status(1);
+                            continue;
                         }
                     }
-                } else {
-                    rl.add_history_entry(line.as_str()).ok();
+                };
+                // Paste nhiều dòng: mỗi lệnh 1 entry (gọn cho ↑ / Ctrl-R), còn
+                // dòng nối bằng `\` gộp lại thành 1 entry chạy được.
+                for entry in history::entries(&line) {
+                    rl.add_history_entry(entry).ok();
                 }
                 // Lưu tăng dần ra đĩa: lịch sử sống sót cả khi shell bị kill chứ
                 // không chỉ khi thoát sạch. append chỉ ghi entry mới (no-op rẻ
@@ -138,9 +157,25 @@ fn main() -> Result<()> {
                     }
                 }
 
+                // Báo job nền đã xong / bị dừng trong lúc chờ ở prompt (bash in
+                // trước khi chạy lệnh kế tiếp).
+                shell.borrow_mut().reap_jobs();
+                if line.trim() != "exit" && !line.trim().starts_with("exit ") {
+                    jobctl::reset_exit_warning();
+                }
+                jobctl::take_interrupted();
+
                 let started = Instant::now();
                 let result = run_line(&shell, &line);
                 let elapsed = started.elapsed();
+
+                // `history -c`: builtin không chạm được rustyline nên chỉ bật cờ.
+                if std::mem::take(&mut shell.borrow_mut().history_clear_requested) {
+                    // save_history là no-op khi không có entry mới → tự cắt file.
+                    let _ = rl.clear_history();
+                    let _ = std::fs::write(&history_path, "");
+                    shell.borrow_mut().history.clear();
+                }
 
                 let code = match result {
                     Ok(code) => {
@@ -165,7 +200,10 @@ fn main() -> Result<()> {
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                // Ctrl-D: exit
+                // Ctrl-D: exit (còn job đang dừng → cảnh báo trước, như bash)
+                if !jobctl::confirm_exit(&shell) {
+                    continue;
+                }
                 println!("{} 👋", i18n::t("common.goodbye"));
                 break;
             }
@@ -177,6 +215,7 @@ fn main() -> Result<()> {
     }
 
     let _ = rl.save_history(&history_path);
+    jobctl::shutdown(&shell);
     Ok(())
 }
 

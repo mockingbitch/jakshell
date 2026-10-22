@@ -46,6 +46,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             i += 1;
             continue;
         }
+        // `\` + xuống dòng giữa hai từ (`... 'url' \` rồi dòng sau thụt lề) =
+        // khoảng trắng. Để read_word xử lý sẽ sinh ra 1 word rỗng → curl báo
+        // "blank argument".
+        if c == '\\' && bytes.get(i + 1) == Some(&'\n') {
+            i += 2;
+            continue;
+        }
+        if c == '\\' && bytes.get(i + 1) == Some(&'\r') {
+            i += if bytes.get(i + 2) == Some(&'\n') { 3 } else { 2 };
+            continue;
+        }
         if c == '#' {
             // comment: bỏ qua tới hết dòng (không kết thúc toàn bộ input —
             // các dòng sau khi paste nhiều dòng vẫn phải được xử lý).
@@ -462,6 +473,9 @@ mod tests {
             ]
         );
         assert_eq!(count_separators("foo \\\nbar"), 0, "nối dòng không tạo separator");
+        // dòng sau thụt lề (kiểu paste từ Postman/docs) — không sinh word rỗng
+        let w = words("curl 'https://x/v' \\\n  --header 'A: b' \\\r\n  -s");
+        assert_eq!(w, vec!["curl", "https://x/v", "--header", "A: b", "-s"]);
     }
 
     #[test]

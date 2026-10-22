@@ -1822,20 +1822,23 @@ const ALIAS: Explanation = Explanation {
 const HISTORY: Explanation = Explanation {
     name: "history",
     summary: "Xem lịch sử lệnh (builtin)",
-    usage: "history [N]",
+    usage: "history [N] | history -c",
     flags: &[
         ("(không tham số)", "in tất cả"),
         ("N", "in N lệnh gần nhất"),
-        ("!N", "chạy lại lệnh số N (trong nhiều shell)"),
+        ("-c", "xoá toàn bộ lịch sử (cả file)"),
+        ("!N / !-N", "chạy lại lệnh số N / lệnh thứ N tính từ cuối"),
         ("!!", "chạy lại lệnh trước"),
         ("!str", "chạy lại lệnh gần nhất bắt đầu bằng str"),
+        ("!$ / !*", "từ cuối / mọi tham số của lệnh trước"),
     ],
     examples: &[
         ("history", "tất cả"),
+        ("history 20", "20 lệnh gần nhất"),
         ("history | grep git", "tìm trong history"),
-        ("history -c (bash/zsh)", "xoá history"),
+        ("sudo !!", "chạy lại lệnh trước với sudo"),
     ],
-    note: "Tìm reverse: \x1b[33mCtrl-R\x1b[0m trong hầu hết shell (kể cả JakShell).",
+    note: "Tìm reverse: \x1b[33mCtrl-R\x1b[0m. Giữ tối đa 10000 lệnh — đổi bằng `[history] size` trong ~/.jakshrc.toml.",
     skip_run: false,
 };
 

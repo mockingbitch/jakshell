@@ -2274,13 +2274,16 @@ pub fn t(key: &str) -> &'static str {
         // ─── history ───────────────────────────────────────────────────────────
         "explain.history.flag.0" => tr(lang, ["in tất cả", "print all", "모두 출력", "全て表示", "打印全部", "พิมพ์ทั้งหมด"]),
         "explain.history.flag.1" => tr(lang, ["in N lệnh gần nhất", "print last N commands", "최근 N 개 명령 출력", "直近 N 個のコマンドを表示", "打印最近 N 个命令", "พิมพ์ N คำสั่งล่าสุด"]),
-        "explain.history.flag.2" => tr(lang, ["chạy lại lệnh số N (trong nhiều shell)", "rerun command N (in many shells)", "N 번 명령 재실행 (많은 셸에서)", "N 番目のコマンドを再実行 (多くのシェルで)", "重新运行第 N 个命令 (许多 shell)", "รันคำสั่งหมายเลข N อีกครั้ง (ในหลาย shell)"]),
-        "explain.history.flag.3" => tr(lang, ["chạy lại lệnh trước", "rerun previous", "이전 명령 재실행", "前のコマンドを再実行", "重新运行上次命令", "รันคำสั่งก่อนหน้าอีก"]),
-        "explain.history.flag.4" => tr(lang, ["chạy lại lệnh gần nhất bắt đầu bằng str", "rerun last command starting with str", "str 로 시작하는 가장 최근 명령 재실행", "str で始まる直近のコマンドを再実行", "重新运行最近以 str 开头的命令", "รันคำสั่งล่าสุดที่ขึ้นต้นด้วย str"]),
+        "explain.history.flag.2" => tr(lang, ["xoá toàn bộ lịch sử (cả file)", "clear all history (file too)", "모든 history 삭제 (파일 포함)", "履歴を全て削除 (ファイルも)", "清除全部历史 (含文件)", "ล้าง history ทั้งหมด (รวมไฟล์)"]),
+        "explain.history.flag.3" => tr(lang, ["chạy lại lệnh số N / lệnh thứ N tính từ cuối", "rerun command N / Nth from the end", "N 번 / 뒤에서 N 번째 명령 재실행", "N 番目 / 後ろから N 番目のコマンドを再実行", "重新运行第 N 个 / 倒数第 N 个命令", "รันคำสั่งหมายเลข N / ลำดับที่ N จากท้ายอีกครั้ง"]),
+        "explain.history.flag.4" => tr(lang, ["chạy lại lệnh trước", "rerun previous", "이전 명령 재실행", "前のコマンドを再実行", "重新运行上次命令", "รันคำสั่งก่อนหน้าอีก"]),
+        "explain.history.flag.5" => tr(lang, ["chạy lại lệnh gần nhất bắt đầu bằng str", "rerun last command starting with str", "str 로 시작하는 가장 최근 명령 재실행", "str で始まる直近のコマンドを再実行", "重新运行最近以 str 开头的命令", "รันคำสั่งล่าสุดที่ขึ้นต้นด้วย str"]),
+        "explain.history.flag.6" => tr(lang, ["từ cuối / mọi tham số của lệnh trước", "last word / all args of previous command", "이전 명령의 마지막 단어 / 모든 인자", "前のコマンドの最後の単語 / 全引数", "上次命令的最后一个词 / 全部参数", "คำสุดท้าย / อาร์กิวเมนต์ทั้งหมดของคำสั่งก่อน"]),
         "explain.history.example.0" => tr(lang, ["tất cả", "all", "전부", "全て", "全部", "ทั้งหมด"]),
-        "explain.history.example.1" => tr(lang, ["tìm trong history", "search history", "history 검색", "履歴を検索", "搜索历史", "ค้น history"]),
-        "explain.history.example.2" => tr(lang, ["xoá history", "clear history", "history 삭제", "履歴を削除", "清除历史", "ล้าง history"]),
-        "explain.history.note" => tr(lang, ["Tìm reverse: \x1b[33mCtrl-R\x1b[0m trong hầu hết shell (kể cả JakShell).", "Reverse search: \x1b[33mCtrl-R\x1b[0m in most shells (including JakShell).", "역방향 검색: 대부분의 셸에서 \x1b[33mCtrl-R\x1b[0m (JakShell 포함).", "逆方向検索: 多くのシェルで \x1b[33mCtrl-R\x1b[0m (JakShell も含む)。", "反向搜索: 大部分 shell 用 \x1b[33mCtrl-R\x1b[0m (含 JakShell)。", "ค้นย้อนกลับ: \x1b[33mCtrl-R\x1b[0m ในหลาย shell (รวมถึง JakShell)"]),
+        "explain.history.example.1" => tr(lang, ["20 lệnh gần nhất", "last 20 commands", "최근 20 개 명령", "直近 20 個のコマンド", "最近 20 个命令", "20 คำสั่งล่าสุด"]),
+        "explain.history.example.2" => tr(lang, ["tìm trong history", "search history", "history 검색", "履歴を検索", "搜索历史", "ค้น history"]),
+        "explain.history.example.3" => tr(lang, ["chạy lại lệnh trước với sudo", "rerun previous command with sudo", "이전 명령을 sudo 로 재실행", "前のコマンドを sudo で再実行", "用 sudo 重新运行上次命令", "รันคำสั่งก่อนหน้าด้วย sudo"]),
+        "explain.history.note" => tr(lang, ["Tìm reverse: \x1b[33mCtrl-R\x1b[0m. Giữ tối đa 10000 lệnh — đổi bằng `[history] size` trong ~/.jakshrc.toml.", "Reverse search: \x1b[33mCtrl-R\x1b[0m. Keeps up to 10000 commands — change via `[history] size` in ~/.jakshrc.toml.", "역방향 검색: \x1b[33mCtrl-R\x1b[0m. 최대 10000 개 명령 보관 — ~/.jakshrc.toml 의 `[history] size` 로 변경.", "逆方向検索: \x1b[33mCtrl-R\x1b[0m。最大 10000 件保持 — ~/.jakshrc.toml の `[history] size` で変更。", "反向搜索: \x1b[33mCtrl-R\x1b[0m。最多保留 10000 条 — 在 ~/.jakshrc.toml 的 `[history] size` 修改。", "ค้นย้อนกลับ: \x1b[33mCtrl-R\x1b[0m เก็บสูงสุด 10000 คำสั่ง — เปลี่ยนได้ที่ `[history] size` ใน ~/.jakshrc.toml"]),
 
         // ─── which ─────────────────────────────────────────────────────────────
         "explain.which.flag.0" => tr(lang, ["in TẤT CẢ kết quả khớp (theo thứ tự PATH)", "print ALL matches (in PATH order)", "모든 일치 결과 출력 (PATH 순서)", "全一致を表示 (PATH 順)", "打印所有匹配 (按 PATH 顺序)", "พิมพ์ทุกผลที่ตรง (ตามลำดับ PATH)"]),

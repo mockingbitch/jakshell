@@ -548,6 +548,10 @@ use_color = true
 [ui]
 blank_line = true           # dòng trống giữa các khối lệnh (dễ nhìn lại output cũ)
 separator = "none"          # "line" = thêm đường kẻ mờ ngang giữa các khối
+pretty_curl = true          # curl ra terminal: dòng HTTP status + JSON đẹp (false = như bash)
+
+[history]
+size = 10000                # số lệnh tối đa giữ lại (như HISTSIZE)
 
 [timing]
 enabled = true
@@ -718,7 +722,7 @@ JakShell/
     ├── theme.rs         # Colors + themes
     ├── config.rs        # ~/.jakshrc.toml + ~/.jakshrc loader
     ├── completion.rs    # Tab completion (rustyline helper)
-    ├── history.rs       # (handled by rustyline)
+    ├── history.rs       # !! / !$ / !N expansion + gộp dòng nối `\` khi lưu
     ├── suggest.rs       # Did-you-mean
     ├── explain.rs       # 70+ command explanations + live annotators
     ├── pretty.rs        # --jak prettifier (ls/ps/df/du/git)

@@ -26,6 +26,53 @@ const CURL_META_START: &str = "<<JAK|";
 const CURL_META_END: &str = ">>";
 const CURL_WRITE_OUT: &str = "\n<<JAK|%{http_code}|%{content_type}|%{time_total}>>";
 
+/// Auto-pretty curl có hợp với các tham số này không? Capture stdout nghĩa là
+/// phải chờ curl chạy xong và mất progress meter / log `-v` theo thời gian
+/// thực, nên tránh khi user: ghi file (`-o/-O`), stream (`-N`), muốn xem
+/// tiến trình (`-#`, `-T`), debug (`-v`, `--trace*`) hay tự định dạng (`-w`).
+pub fn curl_wants_pretty(args: &[String]) -> bool {
+    // Option ngắn của curl có nhận giá trị — phần sau nó trong cụm (vd
+    // `-XPOST`) hoặc tham số kế tiếp là giá trị, không phải cờ.
+    const SHORT_WITH_VALUE: &str = "AbcCdDeEFHKmoPQrtTuUwxXyYz";
+    const SHORT_RAW: &str = "NoOvwT#";
+    const LONG_RAW: &[&str] = &[
+        "no-buffer", "output", "output-dir", "remote-name", "remote-name-all",
+        "verbose", "trace", "trace-ascii", "write-out", "progress-bar", "upload-file",
+    ];
+    const LONG_WITH_VALUE: &[&str] = &[
+        "data", "data-raw", "data-binary", "data-urlencode", "data-ascii", "json",
+        "header", "request", "user", "user-agent", "url", "form", "cookie",
+        "referer", "max-time", "connect-timeout",
+    ];
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if let Some(long) = a.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            if LONG_RAW.contains(&name) {
+                return false;
+            }
+            if LONG_WITH_VALUE.contains(&name) && !long.contains('=') {
+                i += 1;
+            }
+        } else if let Some(cluster) = a.strip_prefix('-') {
+            for (pos, ch) in cluster.char_indices() {
+                if SHORT_RAW.contains(ch) {
+                    return false;
+                }
+                if SHORT_WITH_VALUE.contains(ch) {
+                    if pos + ch.len_utf8() == cluster.len() {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    true
+}
+
 pub fn run(
     shell: &Rc<RefCell<Shell>>,
     argv: &[String],
@@ -43,8 +90,11 @@ pub fn run(
     // Với curl: -sS tắt progress meter (stdout bị capture nên meter sẽ thành
     // rác trên stderr) nhưng vẫn hiện lỗi; -w ghi marker meta sau body.
     // User truyền -w riêng thì flag của họ (đứng sau) thắng — chỉ mất dòng meta.
+    // stdin nối thẳng terminal (output() mặc định đóng stdin) để `-d @-`,
+    // `-u user` hỏi mật khẩu… vẫn hoạt động.
     if cmd == "curl" {
         builder.arg("-sS").arg("-w").arg(CURL_WRITE_OUT);
+        builder.stdin(std::process::Stdio::inherit());
     }
     builder.args(&args);
     builder.current_dir(&shell.borrow().cwd);
@@ -62,6 +112,18 @@ pub fn run(
     };
 
     std::io::stderr().write_all(&output.stderr).ok();
+
+    // Body nhị phân (ảnh, zip…): in nguyên byte như bash, chỉ cắt marker meta.
+    if cmd == "curl" && std::str::from_utf8(&output.stdout).is_err() {
+        let raw = &output.stdout;
+        let marker = format!("\n{}", CURL_META_START);
+        let end = raw
+            .windows(marker.len())
+            .rposition(|w| w == marker.as_bytes())
+            .unwrap_or(raw.len());
+        std::io::stdout().write_all(&raw[..end]).ok();
+        return Ok(output.status.code().unwrap_or(0));
+    }
     let text = String::from_utf8_lossy(&output.stdout);
 
     match cmd {
@@ -963,6 +1025,26 @@ fn write_json(v: &serde_json::Value, indent: usize, color: bool, out: &mut Strin
 #[cfg(test)]
 mod curl_tests {
     use super::*;
+
+    fn wants(args: &str) -> bool {
+        let v: Vec<String> = args.split_whitespace().map(String::from).collect();
+        curl_wants_pretty(&v)
+    }
+
+    #[test]
+    fn pretty_only_for_plain_requests() {
+        assert!(wants("https://x"));
+        assert!(wants("-sSL -X POST -H a:b -d {} https://x"));
+        assert!(wants("-XPOST -d -v https://x")); // `-v` là giá trị của -d
+        assert!(wants("--header -o https://x"));
+        assert!(!wants("-O https://x/f.zip"));
+        assert!(!wants("-sSLo f.zip https://x"));
+        assert!(!wants("-N https://x/sse"));
+        assert!(!wants("-v https://x"));
+        assert!(!wants("--output f https://x"));
+        assert!(!wants("-w %{http_code} https://x"));
+        assert!(!wants("--trace-ascii - https://x"));
+    }
 
     #[test]
     fn write_json_indents_and_keeps_order() {

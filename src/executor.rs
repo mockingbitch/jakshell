@@ -31,6 +31,13 @@ pub fn execute(shell: &Rc<RefCell<Shell>>, prog: &Program) -> Result<i32> {
             }
         }
         last_code = run_pipeline(shell, pipeline)?;
+        shell.borrow_mut().set_last_status(last_code);
+        // Ctrl-C giữa chừng → bỏ phần còn lại của dòng (`sleep 9; rm x` mà
+        // ^C thì KHÔNG chạy `rm x`), như bash.
+        if crate::jobctl::take_interrupted() {
+            last_code = 130;
+            break;
+        }
     }
     shell.borrow_mut().reap_jobs();
     Ok(last_code)
@@ -76,7 +83,13 @@ fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> 
                 // curl tương tác: tự động capture + format response (separator
                 // + pretty JSON). CHỈ khi stdout là TTY và không redirect —
                 // pipe (`curl | jq`) hay `> file` vẫn nhận raw output như cũ.
-                if head == "curl" && cmd.redirects.is_empty() && stdout_is_tty() {
+                // Tải file / stream / -v / -w tự chọn → chạy nguyên bản.
+                if head == "curl"
+                    && cmd.redirects.is_empty()
+                    && shell.borrow().ui.pretty_curl
+                    && crate::pretty::curl_wants_pretty(&argv[1..])
+                    && stdout_is_tty()
+                {
                     return crate::pretty::run(shell, &argv, &cmd.redirects);
                 }
             }
@@ -226,27 +239,21 @@ fn spawn_external(shell: &Rc<RefCell<Shell>>, cmd: &SimpleCommand, background: b
     builder.current_dir(&shell.borrow().cwd);
 
     apply_redirects(&mut builder, shell, &cmd.redirects)?;
+    crate::jobctl::prepare(&mut builder, 0, !background);
 
     match builder.spawn() {
-        Ok(mut child) => {
+        Ok(child) => {
+            let pid = child.id() as i32;
+            let pgid = crate::jobctl::after_spawn(pid, 0, !background);
+            let cmdline = argv.join(" ");
             if background {
-                let pid = child.id() as i32;
-                let id = shell.borrow_mut().add_job(pid, argv.join(" "));
-                println!("\x1b[2m[{}] {}\x1b[0m", id, pid);
+                let id = shell.borrow_mut().add_job(pgid, vec![pid], cmdline);
+                if crate::jobctl::interactive() {
+                    println!("\x1b[2m[{}] {}\x1b[0m", id, pid);
+                }
                 Ok(0)
             } else {
-                let status = child.wait()?;
-                Ok(status.code().unwrap_or_else(|| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::process::ExitStatusExt;
-                        128 + status.signal().unwrap_or(0)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        1
-                    }
-                }))
+                Ok(crate::jobctl::wait_foreground(shell, pgid, &[pid], &cmdline, None))
             }
         }
         Err(e) => {
@@ -265,21 +272,49 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
     let n = commands.len();
     let mut children = Vec::with_capacity(n);
     let mut prev_stdout: Option<Stdio> = None;
+    // Output đã bắt của builtin đứng trước — ghi vào stdin lệnh kế tiếp.
+    let mut pending_input: Option<Vec<u8>> = None;
+    let mut last_builtin_code: Option<i32> = None;
+    let mut pgid = 0;
+    // Lỗi giữa chừng: vẫn phải chờ các lệnh đã spawn (và lấy lại terminal từ
+    // chúng) trước khi trả lỗi — không return sớm.
+    let mut failure: Option<Result<i32>> = None;
 
     for (i, cmd) in commands.iter().enumerate() {
         let argv = build_argv(shell, cmd);
         let (assigns, argv) = split_leading_assignments(argv);
         if argv.is_empty() {
-            return Err(anyhow!("lệnh rỗng trong pipeline"));
+            failure = Some(Err(anyhow!("lệnh rỗng trong pipeline")));
+            break;
         }
         let prog = &argv[0];
         let args = &argv[1..];
 
-        // Builtins inside a pipeline: run them as external echo-like helper? For simplicity, we
-        // fork via /usr/bin/env to re-exec ourselves with the builtin... but simpler: only handle
-        // simple builtins like `echo` via the system command. Here, refuse builtins in pipelines
-        // (rare to need cd|grep). Most useful "builtins" in pipelines are echo/printf which exist
-        // as external commands anyway on macOS/Linux.
+        // Builtin chỉ-in (`history`, `alias`, …) chạy ngay trong shell: output
+        // được bắt lại rồi nạp làm stdin cho lệnh sau. Builtin khác rơi về lệnh
+        // ngoài cùng tên (vd /bin/echo) như trước.
+        if builtins::is_pipe_safe(prog) {
+            prev_stdout = None;
+            if i < n - 1 {
+                match builtins::run_captured(shell, &argv, &cmd.redirects) {
+                    Ok((_, out)) => pending_input = Some(out),
+                    Err(e) => {
+                        failure = Some(Err(e));
+                        break;
+                    }
+                }
+            } else {
+                match builtins::run(shell, &argv, &cmd.redirects) {
+                    Ok(code) => last_builtin_code = Some(code),
+                    Err(e) => {
+                        failure = Some(Err(e));
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
         let mut builder = Command::new(prog);
         builder.args(args);
         builder.envs(assigns);
@@ -287,14 +322,27 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
 
         if let Some(stdin) = prev_stdout.take() {
             builder.stdin(stdin);
+        } else if pending_input.is_some() {
+            builder.stdin(Stdio::piped());
         }
         if i < n - 1 {
             builder.stdout(Stdio::piped());
         }
-        apply_redirects(&mut builder, shell, &cmd.redirects)?;
+        if let Err(e) = apply_redirects(&mut builder, shell, &cmd.redirects) {
+            failure = Some(Err(e));
+            break;
+        }
+        // Cả pipeline chung 1 process group (trưởng = lệnh đầu tiên được spawn).
+        crate::jobctl::prepare(&mut builder, pgid, !background);
 
         match builder.spawn() {
             Ok(mut child) => {
+                pgid = crate::jobctl::after_spawn(child.id() as i32, pgid, !background);
+                if let (Some(data), Some(mut stdin)) = (pending_input.take(), child.stdin.take()) {
+                    std::thread::spawn(move || {
+                        let _ = std::io::Write::write_all(&mut stdin, &data);
+                    });
+                }
                 if i < n - 1 {
                     if let Some(s) = child.stdout.take() {
                         prev_stdout = Some(Stdio::from(s));
@@ -308,28 +356,38 @@ fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], backgr
                 } else {
                     eprintln!("jaksh: không chạy được {}: {}", prog, e);
                 }
-                return Ok(127);
+                failure = Some(Ok(127));
+                break;
             }
         }
     }
+    // Đóng đầu đọc còn treo để lệnh trước nhận EOF/SIGPIPE thay vì chờ mãi.
+    drop(prev_stdout);
 
+    let pids: Vec<i32> = children.iter().map(|(c, _)| c.id() as i32).collect();
+    let cmdline = children.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>().join(" | ");
+    // Child của std không tự wait khi drop — việc thu dọn do jobctl/reap_jobs.
+    drop(children);
+    if pids.is_empty() {
+        return failure.unwrap_or(Ok(last_builtin_code.unwrap_or(0)));
+    }
+    if let Some(f) = failure {
+        if background {
+            shell.borrow_mut().add_job(pgid, pids, cmdline);
+        } else {
+            crate::jobctl::wait_foreground(shell, pgid, &pids, &cmdline, None);
+        }
+        return f;
+    }
     if background {
-        for (child, cmd) in children {
-            let pid = child.id() as i32;
-            let id = shell.borrow_mut().add_job(pid, cmd);
-            println!("\x1b[2m[{}] {}\x1b[0m", id, pid);
-            // intentionally drop child to detach (will be reaped via job system)
-            std::mem::forget(child);
+        let id = shell.borrow_mut().add_job(pgid, pids.clone(), cmdline);
+        if crate::jobctl::interactive() {
+            println!("\x1b[2m[{}] {}\x1b[0m", id, pids.last().copied().unwrap_or(0));
         }
         return Ok(0);
     }
-
-    let mut last_code = 0;
-    for (mut child, _cmd) in children {
-        let status = child.wait()?;
-        last_code = status.code().unwrap_or(1);
-    }
-    Ok(last_code)
+    let code = crate::jobctl::wait_foreground(shell, pgid, &pids, &cmdline, None);
+    Ok(last_builtin_code.unwrap_or(code))
 }
 
 /// stdout có phải terminal không — quyết định có bật auto-pretty (curl, …).
@@ -395,8 +453,10 @@ fn capture_command_output(shell: &Rc<RefCell<Shell>>, src: &str) -> Result<Strin
         .open(&path)
         .map_err(|e| anyhow!("$(...): không tạo được file tạm: {}", e))?;
 
-    // Hoán fd 1 → file trong một scope; drop sẽ khôi phục fd gốc.
+    // Hoán fd 1 → file trong một scope; drop sẽ khôi phục fd gốc. `$(...)`
+    // không có job control (như bash): lệnh con ở chung group với shell.
     {
+        let _nojobs = crate::jobctl::Suspend::new();
         let _swap = FdSwap::new(libc::STDOUT_FILENO, file.as_raw_fd())?;
         flush_std();
         let _ = execute(shell, &prog);

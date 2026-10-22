@@ -18,6 +18,8 @@ struct RcConfig {
     #[serde(default)]
     ui: Option<crate::shell::UiConfig>,
     #[serde(default)]
+    history: Option<crate::shell::HistoryConfig>,
+    #[serde(default)]
     update: Option<crate::shell::UpdateConfig>,
     #[serde(default)]
     news: Option<crate::shell::NewsConfig>,
@@ -46,6 +48,9 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
         }
         if let Some(ui) = cfg.ui {
             shell.borrow_mut().ui = ui;
+        }
+        if let Some(history) = cfg.history {
+            shell.borrow_mut().history_cfg = history;
         }
         if let Some(update) = cfg.update {
             shell.borrow_mut().update = update;

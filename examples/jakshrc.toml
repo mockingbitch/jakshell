@@ -20,6 +20,14 @@ use_color = true
 blank_line = true
 # Đường kẻ mờ ngang giữa các khối lệnh: "none" hoặc "line"
 separator = "none"
+# `curl` gõ thẳng ra terminal: in dòng "HTTP 200 · application/json · 120 ms"
+# + format JSON. Tự tắt khi pipe/redirect hoặc dùng -o/-O/-N/-v/-w.
+# false = curl chạy nguyên bản như bash.
+pretty_curl = true
+
+[history]
+# Số lệnh tối đa giữ trong lịch sử (như HISTSIZE của bash).
+size = 10000
 
 [timing]
 # Hiển thị thời gian thực thi sau mỗi lệnh

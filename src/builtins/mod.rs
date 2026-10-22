@@ -10,11 +10,41 @@ pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
     "help", "?", "which", "true", "false", "explain", "bookmark", "exec",
-    "eval",
+    "eval", "wait", "disown",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
+}
+
+/// Builtin chỉ in ra stdout, không đổi trạng thái shell — chạy được ngay trong
+/// pipeline (`history | grep git`). Builtin còn lại (`cd`, `exit`, `export`…)
+/// trong bash chạy ở subshell nên vô tác dụng; ở đây vẫn rơi về lệnh ngoài.
+pub fn is_pipe_safe(name: &str) -> bool {
+    matches!(name, "history" | "alias" | "jobs" | "which" | "help" | "?" | "explain" | "echo" | "pwd" | "true" | "false")
+}
+
+/// Chạy builtin với stdout chuyển vào pipe, trả về (exit code, output) — để
+/// nạp làm stdin cho lệnh kế tiếp trong pipeline. Một thread đọc song song nên
+/// output lớn hơn buffer pipe cũng không treo.
+pub fn run_captured(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) -> Result<(i32, Vec<u8>)> {
+    let (mut reader, writer) = std::io::pipe()?;
+    let drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut buf).ok();
+        buf
+    });
+    let code = {
+        flush_std();
+        let mut guard = RedirectGuard { saved: Vec::new(), open_files: Vec::new() };
+        guard.replace_fd(1, writer.as_raw_fd())?;
+        drop(writer);
+        let code = run(shell, argv, redirects);
+        drop(guard);
+        code
+    };
+    let out = drain.join().unwrap_or_default();
+    Ok((code?, out))
 }
 
 pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) -> Result<i32> {
@@ -25,18 +55,20 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
     let result = match cmd {
         "cd" => cd(shell, &args),
         "pwd" => pwd(shell),
-        "exit" => exit(&args),
+        "exit" => exit(shell, &args),
         "export" => export(shell, &args),
         "unset" => unset(shell, &args),
         "alias" => alias(shell, &args),
         "unalias" => unalias(shell, &args),
         "echo" => echo(&args),
         "source" | "." => source(shell, &args),
-        "history" => history(shell),
-        "jobs" => jobs(shell),
+        "history" => history(shell, &args),
+        "jobs" => jobs(shell, &args),
+        "wait" => wait(shell, &args),
+        "disown" => disown(shell, &args),
         "fg" => fg(shell, &args),
         "bg" => bg(shell, &args),
-        "kill" => kill(&args),
+        "kill" => kill(shell, &args),
         "help" | "?" => help(),
         "which" => which(shell, &args),
         "true" => Ok(0),
@@ -168,9 +200,20 @@ fn pwd(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
     Ok(0)
 }
 
-fn exit(args: &[&str]) -> Result<i32> {
-    let code = args.first().and_then(|a| a.parse::<i32>().ok()).unwrap_or(0);
-    println!("{} 👋", crate::i18n::t("common.goodbye"));
+fn exit(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let code = match args.first() {
+        Some(a) => a.parse::<i32>().map_err(|_| anyhow!("exit: {}: cần số", a))?,
+        None => shell.borrow().last_status(),
+    };
+    if !crate::jobctl::confirm_exit(shell) {
+        return Ok(1);
+    }
+    // Lời chào chỉ cho phiên tương tác — `-c` / script không được in rác ra stdout.
+    if crate::jobctl::interactive() {
+        println!("{} 👋", crate::i18n::t("common.goodbye"));
+        crate::jobctl::shutdown(shell);
+    }
+    flush_std();
     std::process::exit(code);
 }
 
@@ -257,100 +300,211 @@ fn source(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     Ok(0)
 }
 
-fn history(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     // Đọc từ lịch sử trong bộ nhớ của phiên (cập nhật theo thời gian thực),
     // KHÔNG đọc file: file chỉ phản ánh lần thoát trước nên sẽ cũ, và còn ở
     // định dạng `#V2` (có header + escape `\n`) không hợp để in trực tiếp.
+    match args {
+        [] => {}
+        ["-c"] => {
+            let mut sh = shell.borrow_mut();
+            sh.history.clear();
+            sh.history_clear_requested = true;
+            return Ok(0);
+        }
+        [n] if n.parse::<usize>().is_ok() => {}
+        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c")),
+    }
     let sh = shell.borrow();
-    for (i, line) in sh.history.iter().enumerate() {
+    let total = sh.history.len();
+    let skip = args.first().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| total.saturating_sub(n));
+    for (i, line) in sh.history.iter().enumerate().skip(skip) {
         println!("{:5}  {}", i + 1, line);
     }
     Ok(0)
 }
 
-fn jobs(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
+fn jobs(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     shell.borrow_mut().reap_jobs();
-    let list = shell.borrow().jobs.clone();
-    if list.is_empty() {
-        println!("(không có job đang chạy)");
+    let long = args.contains(&"-l");
+    let only_pids = args.contains(&"-p");
+    let sh = shell.borrow();
+    if sh.jobs.is_empty() {
+        if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+            println!("(không có job nào)");
+        }
         return Ok(0);
     }
-    for j in list {
+    let current = sh.jobs.last().map(|j| j.id);
+    let previous = sh.jobs.iter().rev().nth(1).map(|j| j.id);
+    for j in &sh.jobs {
+        if only_pids {
+            println!("{}", j.pgid);
+            continue;
+        }
+        let mark = if Some(j.id) == current { '+' } else if Some(j.id) == previous { '-' } else { ' ' };
         let state = match j.state {
             crate::shell::JobState::Running => "Running",
             crate::shell::JobState::Stopped => "Stopped",
             crate::shell::JobState::Done => "Done",
         };
-        println!("[{}] {} {} {}", j.id, j.pid, state, j.cmd);
+        if long {
+            println!("[{}]{} {:>7} {:<9} {}", j.id, mark, j.pgid, state, j.cmd);
+        } else {
+            println!("[{}]{}  {:<9} {}", j.id, mark, state, j.cmd);
+        }
     }
     Ok(0)
 }
 
 fn fg(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd::Pid;
-    let id: u32 = args.first().and_then(|s| s.trim_start_matches('%').parse().ok())
-        .unwrap_or_else(|| shell.borrow().jobs.last().map(|j| j.id).unwrap_or(0));
-    let job = shell.borrow().jobs.iter().find(|j| j.id == id).cloned();
-    let job = match job {
-        Some(j) => j,
-        None => { eprintln!("fg: không có job {}", id); return Ok(1); }
-    };
-    println!("{}", job.cmd);
-    let pid = Pid::from_raw(job.pid);
-    // Send SIGCONT and wait.
-    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT);
-    match waitpid(pid, None) {
-        Ok(WaitStatus::Exited(_, code)) => {
-            shell.borrow_mut().jobs.retain(|j| j.id != id);
-            Ok(code)
-        }
-        Ok(_) => {
-            shell.borrow_mut().jobs.retain(|j| j.id != id);
-            Ok(0)
-        }
-        Err(_) => Ok(1),
+    if !crate::jobctl::interactive() {
+        return Err(anyhow!("fg: không có job control (shell không tương tác)"));
     }
+    shell.borrow_mut().reap_jobs();
+    let Some(id) = shell.borrow().find_job(args.first().copied()) else {
+        return Err(anyhow!("fg: {}: không có job này", args.first().unwrap_or(&"%%")));
+    };
+    shell.borrow_mut().touch_job(id);
+    Ok(crate::jobctl::foreground(shell, id))
 }
 
 fn bg(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    let id: u32 = args.first().and_then(|s| s.trim_start_matches('%').parse().ok())
-        .unwrap_or_else(|| shell.borrow().jobs.last().map(|j| j.id).unwrap_or(0));
-    let pid_opt = shell.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.pid);
-    match pid_opt {
-        Some(pid) => {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGCONT);
-            Ok(0)
-        }
-        None => { eprintln!("bg: không có job {}", id); Ok(1) }
-    }
+    shell.borrow_mut().reap_jobs();
+    let Some(id) = shell.borrow().find_job(args.first().copied()) else {
+        return Err(anyhow!("bg: {}: không có job này", args.first().unwrap_or(&"%%")));
+    };
+    let mut sh = shell.borrow_mut();
+    let job = sh.jobs.iter_mut().find(|j| j.id == id).expect("find_job trả id hợp lệ");
+    unsafe { libc::kill(-job.pgid, libc::SIGCONT) };
+    job.state = crate::shell::JobState::Running;
+    println!("[{}]+ {} &", job.id, job.cmd);
+    Ok(0)
 }
 
-fn kill(args: &[&str]) -> Result<i32> {
-    use nix::sys::signal::{kill as nkill, Signal};
-    use nix::unistd::Pid;
+/// `wait [%N|pid ...]` — chờ job nền (không đối số = tất cả) xong.
+fn wait(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let targets: Vec<i32> = if args.is_empty() {
+        shell.borrow().jobs.iter().flat_map(|j| j.pids.clone()).collect()
+    } else {
+        let sh = shell.borrow();
+        let mut v = Vec::new();
+        for a in args {
+            if a.starts_with('%') {
+                let id = sh.find_job(Some(a)).ok_or_else(|| anyhow!("wait: {}: không có job này", a))?;
+                v.extend(sh.jobs.iter().find(|j| j.id == id).map(|j| j.pids.clone()).unwrap_or_default());
+            } else {
+                v.push(a.parse().map_err(|_| anyhow!("wait: `{}`: không phải pid hay job", a))?);
+            }
+        }
+        v
+    };
+    let mut code = 0;
+    for pid in targets {
+        let mut st = 0;
+        loop {
+            let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                if crate::jobctl::take_interrupted() {
+                    return Ok(130);
+                }
+                continue;
+            }
+            code = if r < 0 { 127 } else if libc::WIFSIGNALED(st) { 128 + libc::WTERMSIG(st) } else { libc::WEXITSTATUS(st) };
+            break;
+        }
+        for j in shell.borrow_mut().jobs.iter_mut() {
+            j.pids.retain(|&p| p != pid);
+        }
+    }
+    shell.borrow_mut().jobs.retain(|j| !j.pids.is_empty());
+    Ok(code)
+}
+
+/// `disown [%N]` — bỏ job khỏi danh sách (shell không theo dõi / HUP nữa).
+fn disown(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    if args == ["-a"] {
+        shell.borrow_mut().jobs.clear();
+        return Ok(0);
+    }
+    let Some(id) = shell.borrow().find_job(args.first().copied()) else {
+        return Err(anyhow!("disown: {}: không có job này", args.first().unwrap_or(&"%%")));
+    };
+    shell.borrow_mut().jobs.retain(|j| j.id != id);
+    Ok(0)
+}
+
+fn kill(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    use nix::sys::signal::Signal;
+    use std::str::FromStr;
     if args.is_empty() {
-        eprintln!("dùng: kill [-SIGNAL] <pid>");
+        eprintln!("dùng: kill [-SIGNAL | -s SIGNAL] <pid | %job> ...  ·  kill -l");
         return Ok(2);
+    }
+    let parse_sig = |name: &str| -> Option<Signal> {
+        if let Ok(n) = name.parse::<i32>() {
+            return Signal::try_from(n).ok();
+        }
+        let up = name.to_ascii_uppercase();
+        let full = if up.starts_with("SIG") { up } else { format!("SIG{}", up) };
+        Signal::from_str(&full).ok()
+    };
+    if args[0] == "-l" || args[0] == "-L" {
+        // `kill -l 9` → KILL, `kill -l 130` → INT (mã thoát 128+N), `kill -l` → tất cả.
+        if let Some(n) = args.get(1).and_then(|a| a.parse::<i32>().ok()) {
+            let n = if n > 128 { n - 128 } else { n };
+            let sig = Signal::try_from(n).map_err(|_| anyhow!("kill: {}: số tín hiệu không hợp lệ", n))?;
+            println!("{}", sig.as_str().trim_start_matches("SIG"));
+        } else {
+            let all: Vec<String> = Signal::iterator().map(|s| format!("{:>2}) {}", s as i32, s.as_str())).collect();
+            for chunk in all.chunks(5) {
+                println!("{}", chunk.join("\t"));
+            }
+        }
+        return Ok(0);
     }
     let mut sig = Signal::SIGTERM;
     let mut i = 0;
-    if args[0].starts_with('-') {
-        let name = args[0].trim_start_matches('-');
-        sig = match name {
-            "9" | "KILL" => Signal::SIGKILL,
-            "15" | "TERM" => Signal::SIGTERM,
-            "2" | "INT" => Signal::SIGINT,
-            "1" | "HUP" => Signal::SIGHUP,
-            _ => Signal::SIGTERM,
-        };
+    if args[0] == "-s" || args[0] == "-n" {
+        let name = args.get(1).ok_or_else(|| anyhow!("kill: thiếu tên tín hiệu sau {}", args[0]))?;
+        sig = parse_sig(name).ok_or_else(|| anyhow!("kill: {}: tín hiệu không hợp lệ", name))?;
+        i = 2;
+    } else if let Some(name) = args[0].strip_prefix('-') {
+        sig = parse_sig(name).ok_or_else(|| anyhow!("kill: {}: tín hiệu không hợp lệ", name))?;
         i = 1;
     }
-    for s in &args[i..] {
-        let pid: i32 = s.parse().unwrap_or(0);
-        let _ = nkill(Pid::from_raw(pid), sig);
+    let mut code = 0;
+    for target in &args[i..] {
+        // `%N` → cả process group của job (pid âm).
+        let pid = if target.starts_with('%') {
+            let sh = shell.borrow();
+            match sh.find_job(Some(target)).and_then(|id| sh.jobs.iter().find(|j| j.id == id)) {
+                Some(j) => -j.pgid,
+                None => {
+                    eprintln!("jaksh: kill: {}: không có job này", target);
+                    code = 1;
+                    continue;
+                }
+            }
+        } else {
+            match target.parse::<i32>() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("jaksh: kill: {}: phải là pid hoặc %job", target);
+                    code = 1;
+                    continue;
+                }
+            }
+        };
+        if let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), sig) {
+            eprintln!("jaksh: kill: ({}) - {}", target, e.desc());
+            code = 1;
+        } else if pid < 0 && sig != Signal::SIGCONT {
+            // Job đang dừng không xử lý được tín hiệu tới khi chạy lại.
+            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Signal::SIGCONT);
+        }
     }
-    Ok(0)
+    Ok(code)
 }
 
 fn help() -> Result<i32> {
@@ -425,6 +579,7 @@ fn exec_replace(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let mut c = std::process::Command::new(args[0]);
     c.args(&args[1..]);
     c.current_dir(&shell.borrow().cwd);
+    crate::jobctl::reset_for_exec(&mut c);
     // exec() chỉ trả về khi THẤT BẠI — thành công thì process này biến mất.
     let err = c.exec();
     if err.kind() == std::io::ErrorKind::NotFound {
