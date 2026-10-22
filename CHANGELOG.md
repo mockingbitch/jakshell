@@ -7,6 +7,14 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.1.2] — Sửa lỗi build trên macOS
+
+### Đã sửa
+
+- **`./install.sh` lỗi `cannot find function pipe2 in crate libc` trên macOS** — v1.1.1 dùng `pipe2()` (chỉ có trên Linux) để tạo pipe. Trên macOS giờ dùng `pipe()` + `fcntl(FD_CLOEXEC)`; Linux vẫn dùng `pipe2()` như cũ.
+
+---
+
 ## [v1.1.1] — Login shell đọc `~/.profile` như bash
 
 ### Đã sửa
