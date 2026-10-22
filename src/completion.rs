@@ -216,7 +216,14 @@ impl Highlighter for ShellHelper {
     }
 }
 
-impl Validator for ShellHelper {}
+/// Lệnh chưa nhập xong (`if` thiếu `fi`, nháy chưa đóng, `|` cuối dòng,
+/// here-doc chưa có delimiter…) → Enter xuống dòng để gõ tiếp thay vì báo lỗi.
+impl Validator for ShellHelper {
+    fn validate(&self, ctx: &mut rustyline::validate::ValidationContext) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        use rustyline::validate::ValidationResult;
+        Ok(if crate::parser::needs_more(ctx.input()) { ValidationResult::Incomplete } else { ValidationResult::Valid(None) })
+    }
+}
 
 fn current_word(line: &str, pos: usize) -> (usize, &str) {
     let bytes = line.as_bytes();

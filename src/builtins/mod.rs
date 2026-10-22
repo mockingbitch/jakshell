@@ -5,49 +5,25 @@ use std::rc::Rc;
 use crate::parser::Redirect;
 use crate::shell::Shell;
 
+mod script;
+
 pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
     "help", "?", "which", "true", "false", "explain", "bookmark", "exec",
     "eval", "wait", "disown", "readonly", "declare", "typeset", "shift",
-    "read", "command", "type", "hash", "builtin",
+    "read", "command", "type", "hash", "builtin", ":", "break", "continue", "return",
+    "local", "let", "test", "[", "shopt", "getopts", "mapfile", "readarray", "printf",
+];
+
+/// Từ khoá của shell (cho `type`).
+const KEYWORDS: &[&str] = &[
+    "if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "{", "}",
+    "[[", "]]", "function", "!", "time",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
-}
-
-/// Builtin chỉ in ra stdout, không đổi trạng thái shell — chạy được ngay trong
-/// pipeline (`history | grep git`). Builtin còn lại (`cd`, `exit`, `export`…)
-/// trong bash chạy ở subshell nên vô tác dụng; ở đây vẫn rơi về lệnh ngoài.
-pub fn is_pipe_safe(name: &str) -> bool {
-    matches!(
-        name,
-        "history" | "alias" | "jobs" | "which" | "help" | "?" | "explain" | "echo" | "pwd" | "true" | "false"
-            | "type" | "command"
-    )
-}
-
-/// Chạy builtin với stdout chuyển vào pipe, trả về (exit code, output) — để
-/// nạp làm stdin cho lệnh kế tiếp trong pipeline. Một thread đọc song song nên
-/// output lớn hơn buffer pipe cũng không treo.
-pub fn run_captured(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) -> Result<(i32, Vec<u8>)> {
-    let (mut reader, writer) = std::io::pipe()?;
-    let drain = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut buf).ok();
-        buf
-    });
-    let code = {
-        let mut plan = crate::redirect::Plan::default();
-        plan.push(1, crate::redirect::FdAction::Open(writer.into()));
-        let guard = crate::redirect::apply_in_process(plan)?;
-        let code = run(shell, argv, redirects);
-        drop(guard);
-        code
-    };
-    let out = drain.join().unwrap_or_default();
-    Ok((code?, out))
 }
 
 pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) -> Result<i32> {
@@ -88,8 +64,17 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "kill" => kill(shell, &args),
         "help" | "?" => help(),
         "which" => which(shell, &args),
-        "true" => Ok(0),
+        "true" | ":" => Ok(0),
         "false" => Ok(1),
+        "break" | "continue" => script::loop_control(shell, cmd, &args),
+        "return" => script::return_(shell, &args),
+        "local" => script::local(shell, &args),
+        "let" => script::let_(shell, &args),
+        "test" | "[" => crate::cond::test_builtin(shell, cmd, &args),
+        "shopt" => script::shopt(shell, &args),
+        "getopts" => script::getopts(shell, &args),
+        "mapfile" | "readarray" => script::mapfile(shell, &args),
+        "printf" => script::printf(shell, &args),
         "set" => set(shell, &args),
         "explain" => crate::explain::run(shell, &argv[1..].to_vec()),
         "bookmark" => crate::bookmark::run(shell, argv),
@@ -107,8 +92,6 @@ fn flush_std() {
     let _ = std::io::stderr().flush();
 }
 
-/// Save the original stdin/stdout/stderr file descriptors and apply the
-/// redirects. When dropped, restores the originals.
 fn cd(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let target = if args.is_empty() {
         dirs::home_dir().ok_or_else(|| anyhow!("không tìm được HOME"))?
@@ -240,11 +223,36 @@ fn valid_name(k: &str) -> bool {
 }
 
 fn unset(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut only_func = false;
+    let mut only_var = false;
     let mut code = 0;
-    for a in args.iter().filter(|a| !matches!(**a, "-v" | "-f")) {
-        if let Err(e) = shell.borrow_mut().unset_var(a) {
-            eprintln!("jaksh: unset: {e}");
-            code = 1;
+    for a in args {
+        match *a {
+            "-f" => only_func = true,
+            "-v" => only_var = true,
+            "-n" => {}
+            name => {
+                // `unset 'a[i]'` — xoá 1 phần tử mảng.
+                if let Some((arr, rest)) = name.split_once('[') {
+                    let raw = rest.strip_suffix(']').unwrap_or(rest);
+                    let idx = crate::expand::eval_index(shell, arr, raw)?;
+                    if let Err(e) = shell.borrow_mut().unset_index(arr, &idx) {
+                        eprintln!("jaksh: unset: {e}");
+                        code = 1;
+                    }
+                    continue;
+                }
+                let mut sh = shell.borrow_mut();
+                let is_var = sh.get_var(name).is_some() || sh.is_array(name);
+                if only_func || (!only_var && !is_var && sh.functions.contains_key(name)) {
+                    sh.functions.remove(name);
+                    continue;
+                }
+                if let Err(e) = sh.unset_var(name) {
+                    eprintln!("jaksh: unset: {e}");
+                    code = 1;
+                }
+            }
         }
     }
     Ok(code)
@@ -272,11 +280,29 @@ fn readonly(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     Ok(0)
 }
 
-/// `declare` / `typeset` — phần không cần mảng: `-x` export, `+x` bỏ export,
-/// `-r` readonly, `-p` in, `-i` (số nguyên — giữ chuỗi, chưa có số học).
+/// In 1 mảng dạng `declare -a a=([0]="x" [1]="y")`.
+fn print_array_decl(shell: &Shell, name: &str) {
+    let ro = if shell.readonly.contains(name) { "r" } else { "" };
+    if let Some(m) = shell.assocs.get(name) {
+        let items: Vec<String> = m.iter().map(|(k, v)| format!("[{}]={}", dq(k), dq(v))).collect();
+        println!("declare -A{} {}=({})", ro, name, items.join(" "));
+    } else if let Some(a) = shell.arrays.get(name) {
+        let items: Vec<String> = a.iter().map(|(k, v)| format!("[{}]={}", k, dq(v))).collect();
+        println!("declare -a{} {}=({})", ro, name, items.join(" "));
+    }
+}
+
+/// `declare` / `typeset`: `-a` mảng, `-A` mảng kết hợp, `-x` export, `+x` bỏ
+/// export, `-r` readonly, `-p` in, `-f`/`-F` function, `-g` toàn cục, `-i`
+/// (số nguyên — giữ chuỗi). Trong function, `declare x` = `local x` (như bash).
 fn declare(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let mut export = None;
     let mut ro = false;
+    let mut indexed = false;
+    let mut assoc = false;
+    let mut global = false;
+    let mut integer = false;
+    let mut funcs = None;
     let mut names = Vec::new();
     for a in args {
         if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty() && !f.contains('=')) {
@@ -284,9 +310,13 @@ fn declare(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
                 match f {
                     'x' => export = Some(true),
                     'r' => ro = true,
-                    'p' | 'i' | 'g' | 'l' | 'u' => {}
-                    'a' | 'A' => return Err(anyhow!("declare: -{}: chưa hỗ trợ mảng", f)),
-                    'f' | 'F' => return Err(anyhow!("declare: -{}: chưa hỗ trợ function", f)),
+                    'a' => indexed = true,
+                    'A' => assoc = true,
+                    'g' => global = true,
+                    'f' => funcs = Some(true),
+                    'F' => funcs = Some(false),
+                    'i' => integer = true,
+                    'p' | 'l' | 'u' | 'n' | 't' => {}
                     _ => return Err(anyhow!("declare: -{}: tuỳ chọn không hợp lệ", f)),
                 }
             }
@@ -296,37 +326,111 @@ fn declare(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             names.push(*a);
         }
     }
+    if let Some(with_body) = funcs {
+        let sh = shell.borrow();
+        let mut list: Vec<&String> = if names.is_empty() {
+            sh.functions.keys().collect()
+        } else {
+            sh.functions.keys().filter(|k| names.contains(&k.as_str())).collect()
+        };
+        list.sort();
+        for f in &list {
+            if with_body {
+                println!("{} () {{ … }}", f);
+            } else {
+                println!("declare -f {}", f);
+            }
+        }
+        return Ok(if !names.is_empty() && list.len() < names.len() { 1 } else { 0 });
+    }
     if names.is_empty() {
         let sh = shell.borrow();
+        if indexed || assoc {
+            let mut list: Vec<&String> = if assoc { sh.assocs.keys().collect() } else { sh.arrays.keys().collect() };
+            list.sort();
+            for n in list {
+                print_array_decl(&sh, n);
+            }
+            return Ok(0);
+        }
         print_decls(&sh, |k| (!ro || sh.readonly.contains(k)) && (export != Some(true) || sh.exported.contains(k)));
         return Ok(0);
     }
+    let in_function = !shell.borrow().funcnames.is_empty();
+    let mut code = 0;
     for a in names {
         let (k, v) = a.split_once('=').map_or((a, None), |(k, v)| (k, Some(v)));
         if !valid_name(k) {
-            return Err(anyhow!("declare: `{}`: tên biến không hợp lệ", a));
+            eprintln!("jaksh: declare: `{}`: tên biến không hợp lệ", a);
+            code = 1;
+            continue;
         }
+        let only_print = args.contains(&"-p") && v.is_none();
         let mut sh = shell.borrow_mut();
-        match (export, v) {
-            (Some(true), v) => sh.export_var(k, v)?,
+        if only_print {
+            if sh.is_array(k) {
+                print_array_decl(&sh, k);
+            } else if let Some(val) = sh.env.get(k) {
+                let flags = if sh.exported.contains(k) { "-x" } else { "--" };
+                println!("declare {} {}={}", flags, k, dq(val));
+            } else {
+                eprintln!("jaksh: declare: {}: không tìm thấy", k);
+                code = 1;
+            }
+            continue;
+        }
+        if in_function && !global {
+            sh.make_local(k)?;
+        }
+        if integer {
+            sh.integers.insert(k.to_string());
+        }
+        // `declare -i n=2+3` → 5.
+        let computed;
+        let v = match v {
+            Some(expr) if sh.integers.contains(k) => {
+                drop(sh);
+                computed = crate::expand::eval_arith(shell, expr)?.to_string();
+                sh = shell.borrow_mut();
+                Some(computed.as_str())
+            }
+            other => other,
+        };
+        if assoc && !sh.is_assoc(k) {
+            sh.set_assoc(k, Default::default())?;
+        } else if indexed && !sh.arrays.contains_key(k) {
+            let first = sh.env.get(k).cloned();
+            let mut arr = std::collections::BTreeMap::new();
+            if let Some(f) = first {
+                arr.insert(0, f);
+            }
+            sh.set_array(k, arr)?;
+        }
+        let res = match (export, v) {
+            (Some(true), v) => sh.export_var(k, v),
             (Some(false), v) => {
-                if let Some(v) = v {
-                    sh.set_var(k, v)?;
-                }
+                let r = v.map_or(Ok(()), |v| sh.set_var(k, v));
                 sh.unexport_var(k);
+                r
             }
-            (None, Some(v)) => sh.set_var(k, v)?,
+            (None, Some(v)) => sh.set_var(k, v),
             (None, None) => {
-                if !sh.env.contains_key(k) {
-                    sh.set_var(k, "")?;
+                if !sh.env.contains_key(k) && !sh.is_array(k) && !in_function {
+                    sh.set_var(k, "")
+                } else {
+                    Ok(())
                 }
             }
+        };
+        if let Err(e) = res {
+            eprintln!("jaksh: declare: {e}");
+            code = 1;
         }
         if ro {
             sh.readonly.insert(k.to_string());
         }
     }
-    Ok(0)
+    Ok(code)
 }
 
 /// `shift [n]` — bỏ n tham số vị trí đầu.
@@ -377,9 +481,7 @@ fn set(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
         if body == "o" {
             match args.get(i + 1) {
                 Some(name) => {
-                    if !shell.borrow_mut().opts.set(name, on) {
-                        return Err(anyhow!("set: {}: tên tuỳ chọn không hợp lệ", name));
-                    }
+                    set_named_option(shell, name, on)?;
                     i += 2;
                     continue;
                 }
@@ -397,7 +499,15 @@ fn set(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
                 }
             }
         }
+        // Cụm cờ có thể chứa `o` lấy tên tuỳ chọn ở đối số sau: `set -euo pipefail`.
+        let mut consumed = 0;
         for c in body.chars() {
+            if c == 'o' {
+                consumed += 1;
+                let name = args.get(i + consumed).ok_or_else(|| anyhow!("set: -o: thiếu tên tuỳ chọn"))?;
+                set_named_option(shell, name, on)?;
+                continue;
+            }
             match ShellOpts::name_of_flag(c) {
                 Some(name) => {
                     shell.borrow_mut().opts.set(name, on);
@@ -407,9 +517,23 @@ fn set(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
                 None => return Err(anyhow!("set: -{}: tuỳ chọn không hợp lệ", c)),
             }
         }
-        i += 1;
+        i += 1 + consumed;
     }
     Ok(0)
+}
+
+/// `set -o tên` / `set +o tên`. Tuỳ chọn bash chưa có tác dụng ở jaksh (vi,
+/// emacs, history…) được nhận im lặng để `.bashrc` / script không hỏng.
+fn set_named_option(shell: &Rc<RefCell<Shell>>, name: &str, on: bool) -> Result<()> {
+    const HARMLESS: [&str; 20] = [
+        "vi", "emacs", "history", "posix", "monitor", "braceexpand", "hashall", "histexpand",
+        "interactive-comments", "ignoreeof", "notify", "functrace", "errtrace", "nolog", "onecmd", "physical",
+        "privileged", "verbose", "keyword", "noexec",
+    ];
+    if shell.borrow_mut().opts.set(name, on) || HARMLESS.contains(&name) {
+        return Ok(());
+    }
+    Err(anyhow!("set: {}: tên tuỳ chọn không hợp lệ", name))
 }
 
 /// Bọc nháy đơn nếu cần (an toàn để dán lại vào shell) — dùng cho `set`, `set -x`.
@@ -563,6 +687,7 @@ fn read(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let mut timeout: Option<f64> = None;
     let mut nchars: Option<usize> = None;
     let mut delim = b'\n';
+    let mut array: Option<String> = None;
     let mut names: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -585,7 +710,7 @@ fn read(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
                         't' => timeout = Some(val.parse().map_err(|_| anyhow!("read: {}: thời gian không hợp lệ", val))?),
                         'n' | 'N' => nchars = Some(val.parse().map_err(|_| anyhow!("read: {}: số không hợp lệ", val))?),
                         'd' => delim = val.bytes().next().unwrap_or(0),
-                        'a' => return Err(anyhow!("read: -a: chưa hỗ trợ mảng")),
+                        'a' => array = Some(val),
                         _ => return Err(anyhow!("read: -u: chưa hỗ trợ")),
                     }
                     break;
@@ -694,7 +819,16 @@ fn read(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let ifs = shell.borrow().get_var("IFS").unwrap_or_else(|| " \t\n".into());
     let is_ifs = |c: char| ifs.contains(c);
     let mut sh = shell.borrow_mut();
-    if names.is_empty() {
+    if let Some(arr) = array {
+        // -a: mỗi từ (tách theo IFS) là 1 phần tử.
+        let fields = line
+            .split(|c: char| is_ifs(c))
+            .filter(|f| !f.is_empty())
+            .enumerate()
+            .map(|(i, f)| (i as i64, f.to_string()))
+            .collect();
+        sh.set_array(&arr, fields)?;
+    } else if names.is_empty() {
         sh.set_var("REPLY", &line)?;
     } else {
         let mut rest = line.trim_matches(|c: char| is_ifs(c) && c.is_whitespace());
@@ -727,9 +861,11 @@ fn path_lookup(shell: &Shell, name: &str) -> Option<std::path::PathBuf> {
     which::which_in(name, Some(path), &shell.cwd).ok()
 }
 
-/// Cách shell sẽ hiểu `name`: alias / builtin / file.
+/// Cách shell sẽ hiểu `name`: alias / từ khoá / function / builtin / file.
 enum Kind {
     Alias(String),
+    Keyword,
+    Function,
     Builtin,
     File(std::path::PathBuf),
 }
@@ -738,6 +874,12 @@ fn classify(shell: &Shell, name: &str, all: bool) -> Vec<Kind> {
     let mut out = Vec::new();
     if let Some(v) = shell.aliases.get(name) {
         out.push(Kind::Alias(v.clone()));
+    }
+    if KEYWORDS.contains(&name) {
+        out.push(Kind::Keyword);
+    }
+    if shell.functions.contains_key(name) {
+        out.push(Kind::Function);
     }
     if is_builtin(name) || name == "jak" || name == "command" || name == "builtin" {
         out.push(Kind::Builtin);
@@ -769,7 +911,9 @@ fn command(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             Some(Kind::Alias(v)) if verbose => println!("{} is aliased to `{}'", name, v),
             Some(Kind::Alias(v)) => println!("alias {}={}", name, sq(&v)),
             Some(Kind::Builtin) if verbose => println!("{} is a shell builtin", name),
-            Some(Kind::Builtin) => println!("{}", name),
+            Some(Kind::Keyword) if verbose => println!("{} is a shell keyword", name),
+            Some(Kind::Function) if verbose => println!("{} is a function", name),
+            Some(Kind::Builtin | Kind::Keyword | Kind::Function) => println!("{}", name),
             Some(Kind::File(p)) if verbose => println!("{} is {}", name, p.display()),
             Some(Kind::File(p)) => println!("{}", p.display()),
             None => {
@@ -810,14 +954,17 @@ fn type_(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
         }
         for k in kinds {
             match k {
-                Kind::Alias(_) if only_path => {}
-                Kind::Builtin if only_path => {}
+                Kind::Alias(_) | Kind::Keyword | Kind::Function | Kind::Builtin if only_path => {}
                 Kind::File(p) if only_path => println!("{}", p.display()),
                 Kind::Alias(_) if only_type => println!("alias"),
                 Kind::Builtin if only_type => println!("builtin"),
+                Kind::Keyword if only_type => println!("keyword"),
+                Kind::Function if only_type => println!("function"),
                 Kind::File(_) if only_type => println!("file"),
                 Kind::Alias(v) => println!("{} is aliased to `{}'", name, v),
                 Kind::Builtin => println!("{} is a shell builtin", name),
+                Kind::Keyword => println!("{} is a shell keyword", name),
+                Kind::Function => println!("{} is a function", name),
                 Kind::File(p) => println!("{} is {}", name, p.display()),
             }
             if !all {
@@ -835,9 +982,17 @@ fn source(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let saved = (args.len() > 1).then(|| {
         std::mem::replace(&mut shell.borrow_mut().positional, args[1..].iter().map(|s| s.to_string()).collect())
     });
+    script::SOURCE_DEPTH.with(|d| d.set(d.get() + 1));
     let code = crate::config::run_script(shell, &content);
+    script::SOURCE_DEPTH.with(|d| d.set(d.get() - 1));
     if let Some(p) = saved {
         shell.borrow_mut().positional = p;
+    }
+    // `return` trong file được source chỉ kết thúc file đó.
+    let mut sh = shell.borrow_mut();
+    if sh.flow == crate::shell::Flow::Return && sh.funcnames.is_empty() {
+        sh.flow = crate::shell::Flow::Normal;
+        return Ok(sh.last_status());
     }
     code
 }

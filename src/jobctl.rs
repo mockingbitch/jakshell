@@ -8,7 +8,7 @@
 //!   • Job xong / bị dừng → shell lấy lại terminal và khôi phục chế độ terminal
 //!     (phòng chương trình bị giết khi đang ở raw mode, vd vim, less).
 //!
-//! Lệnh chạy NGOÀI cơ chế này (tiện ích `jak`, `--jak`, `$(...)`) vẫn ở chung
+//! Lệnh chạy NGOÀI cơ chế này (tiện ích `jak`, `--jak`) và `$(...)` ở chung
 //! group với shell: Ctrl-C giết lệnh con, còn shell chỉ ghi nhận cờ ngắt nhờ
 //! handler; Ctrl-Z bị bỏ qua (kế thừa SIG_IGN) nên không thể treo shell.
 //!
@@ -41,9 +41,6 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
-    /// > 0 khi đang chạy `$(...)`: lệnh con ở chung group với shell, không
-    /// nhận terminal (giống bash — command substitution không có job control).
-    static SUSPEND_DEPTH: Cell<u32> = const { Cell::new(0) };
     /// Đã cảnh báo "còn job đang dừng" cho lần `exit` trước chưa.
     static EXIT_WARNED: Cell<bool> = const { Cell::new(false) };
 }
@@ -106,39 +103,18 @@ pub fn init() {
     }
 }
 
-/// Job control đang bật (REPL tương tác, không ở trong `$(...)`)?
+/// Job control đang bật (REPL tương tác, không phải subshell)?
 pub fn active() -> bool {
-    SUSPEND_DEPTH.with(|d| d.get()) == 0 && STATE.with(|s| s.borrow().is_some())
+    STATE.with(|s| s.borrow().is_some())
 }
 
-/// Đang chạy bên trong `$(...)`?
-pub fn in_capture() -> bool {
-    SUSPEND_DEPTH.with(|d| d.get()) > 0
-}
-
-/// REPL tương tác (bất kể đang trong `$(...)` hay không)?
+/// Phiên tương tác (shell chính, không phải subshell)?
 pub fn interactive() -> bool {
     STATE.with(|s| s.borrow().is_some())
 }
 
 fn with_state<T>(f: impl FnOnce(&State) -> T) -> Option<T> {
     STATE.with(|s| s.borrow().as_ref().map(f))
-}
-
-/// Tạm tắt job control trong phạm vi guard (dùng cho `$(...)`).
-pub struct Suspend;
-
-impl Suspend {
-    pub fn new() -> Self {
-        SUSPEND_DEPTH.with(|d| d.set(d.get() + 1));
-        Suspend
-    }
-}
-
-impl Drop for Suspend {
-    fn drop(&mut self) {
-        SUSPEND_DEPTH.with(|d| d.set(d.get() - 1));
-    }
 }
 
 /// Có Ctrl-C chưa xử lý không (không xoá cờ — để `execute` còn bỏ phần sau).
@@ -172,6 +148,36 @@ pub fn prepare(cmd: &mut Command, pgid: i32, foreground: bool) {
             Ok(())
         });
     }
+}
+
+/// Trong tiến trình con vừa fork (thành viên pipeline / subshell / nền): vào
+/// group của job, nhận terminal nếu foreground, tín hiệu về mặc định, và tắt
+/// job control (subshell không quản lý job riêng — như bash).
+pub fn child_setup(pgid: i32, foreground: bool) {
+    if let Some(tty) = with_state(|s| s.tty).filter(|_| active()) {
+        unsafe {
+            libc::setpgid(0, pgid);
+            if foreground {
+                libc::tcsetpgrp(tty, libc::getpgrp());
+            }
+            for sig in JOB_SIGNALS {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+        }
+    }
+    STATE.with(|s| *s.borrow_mut() = None);
+}
+
+/// Trong tiến trình con của `$(...)` / `<(...)`: ở chung group với shell; Ctrl-C
+/// giết được nó (SIGINT/SIGQUIT về mặc định), Ctrl-Z vẫn bị bỏ qua.
+pub fn child_setup_capture() {
+    if interactive() {
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+        }
+    }
+    STATE.with(|s| *s.borrow_mut() = None);
 }
 
 /// Phía cha sau khi spawn: trả về pgid hiệu lực của job.
@@ -279,7 +285,7 @@ pub fn wait_foreground(shell: &Rc<RefCell<Shell>>, pgid: i32, pids: &[i32], cmd:
     if let Some(id) = existing {
         sh.jobs.retain(|j| j.id != id);
     }
-    sh.pipestatus = codes;
+    sh.set_pipestatus(&codes);
     last_code
 }
 

@@ -20,7 +20,8 @@
 |---|---|---|
 | Audit ban đầu | 50/160 | Ctrl-C giết shell |
 | Job control | 54/160 | 30/30 |
-| **Đợt 1 xong** | **94/160** | **30/30** |
+| Đợt 1 xong | 94/160 | 30/30 |
+| **Đợt 2 xong** | **152/160** (+55 case nâng cao: **207/215**) | **30/30** |
 
 **Đợt 1 đã làm:**
 - **Job control đầy đủ:** process group riêng; Ctrl-C/Ctrl-Z/Ctrl-\ không bao giờ giết hay treo shell; `fg`/`bg`/`jobs -l`/`wait`/`disown`/`kill %N`; khôi phục chế độ terminal; cảnh báo khi thoát còn job dừng.
@@ -34,7 +35,20 @@
 - **`set`:** `-e`, `-u`, `-x`, `-a`, `-C`, `-o pipefail`, `-o`/`+o`; `set` không đối số in biến.
 - **History:** lọc secret khi lưu và `history --scrub`.
 
-**Còn lại:** Đợt 2 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
+**Đợt 2 đã làm** (tự viết parser thay vì dùng `brush-parser`: giữ được lexer riêng của jaksh — paste nhiều dòng, nối `\`, here-doc, `!!` — và không thêm dependency lớn; chỉ thêm `regex` cho `=~`):
+- **AST mới:** `if/elif/else`, `for … in`, `for ((;;))`, `while/until`, `case` (`;;` `;&` `;;&`), `{ }`, `( )`, `(( ))`, `[[ ]]`, function (`f()` / `function f`), `time`, mảng `a=(…)` / `a[i]=` / `a+=(…)`.
+- **Expansion đúng thứ tự bash:** brace → tilde (`~user`) → `${…}` đủ toán tử (`:- := :? :+ # ## % %% / // /# /% :off:len ^ ^^ , ,, @Q`, `${!x}`, `${!a[@]}`, `${#a[@]}`) / `$(( ))` / `$( )` / `<( )` `>( )` → tách từ theo `$IFS` → glob (`nullglob`, `dotglob`, `nocaseglob`, `globstar`) → bỏ nháy. `"$@"` / `"${a[@]}"` giữ nguyên phần tử; `\*` không còn bị glob.
+- **Executor dùng fork thật** cho subshell, mỗi thành viên pipeline (lệnh ngoài được `exec` thẳng) và `$(…)`, nên `cat f | while read l; do …; done` chạy được, còn `cd` / gán biến trong `$(…)` không rò ra ngoài.
+- **Function:** `local` theo từng tầng gọi, `return`, đệ quy (giới hạn 1000 tầng), `$FUNCNAME`, redirect trên lời gọi.
+- **Điều khiển luồng:** `break N` / `continue N`; `set -e` bỏ qua bên trong điều kiện `if`/`while`/`&&`/`||`/`!`, như bash; Ctrl-C dừng cả vòng lặp.
+- **Mảng:** chỉ số (thưa, chỉ số âm) và kết hợp (`declare -A`); `read -a`, `mapfile`/`readarray`, `$PIPESTATUS`, `$BASH_REMATCH`.
+- **Builtin mới:** `test` / `[` (không còn gọi `/usr/bin/[`), `let`, `local`, `return`, `break`, `continue`, `:`, `shopt`, `getopts`, `mapfile`, `printf` (viết lại hoàn toàn, có `-v`), `declare -a/-A/-i/-f/-F/-p`, `unset` cho phần tử mảng và function.
+- **Biến bash có sẵn:** `IFS OPTIND PPID UID EUID HOSTNAME OSTYPE HOSTTYPE SHLVL BASHPID`.
+- **REPL:** Validator — lệnh chưa trọn thì Enter xuống dòng gõ tiếp; khối nhiều dòng lưu thành 1 entry lịch sử.
+- **Hiệu năng ngang bash:** vòng lặp số học 100k lần 0,39 s (bash 0,36 s); 3000 lời gọi function qua `$(…)` 1,98 s (bash 2,42 s).
+- **Script thật:** `install.sh` của repo, `xdg-terminal-exec`, script mẫu dùng `set -euo pipefail` + `getopts` + `declare -A` + `while read` cho output giống hệt bash.
+
+**Còn lại:** Đợt 3 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
 
 ## 1. Bảng gap
 

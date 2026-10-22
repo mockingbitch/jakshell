@@ -47,6 +47,8 @@ Gõ ? hoặc help bất cứ lúc nào.
 ## Tính năng nổi bật
 
 - **POSIX-compatible** — pipe `|`, `&&`, `||`, `;`, `&`, `!`; mọi dạng redirect (`2>&1`, `N>&M`, `>&-`, `&>>`, `>|`, `<>`), here-doc `<<EOF` / `<<-EOF` / `<<'EOF'`, here-string `<<<`; glob, biến, tilde, quote chuẩn; `$1…$#` `$@` `$?` `$$` `$!` `$RANDOM` `${PIPESTATUS[@]}`; `set -euxa` / `-o pipefail` / `-o noclobber`.
+- **Viết script như bash** — `if/elif/else`, `for … in`, `for ((;;))`, `while/until`, `case` (`;;` `;&` `;;&`), function + `local`/`return`, `break/continue N`, `{ }` / `( )` subshell, `[[ … ]]` (glob, `=~` + `BASH_REMATCH`), `$(( ))` / `(( ))` / `let`, `${x:-…}` `${#x}` `${x##*/}` `${x//a/b}` `${x:1:3}` `${x^^}`…, brace `{a,b}` `{1..10}`, mảng `a=(…)` / `declare -A`, `read -a`, `mapfile`, `getopts`, `printf`, process substitution `<(…)`, tách từ theo `$IFS`. Chạy được script bash thật (đối chiếu tự động với bash: 207/215 case).
+- **Gõ lệnh nhiều dòng** — `for`/`if`/function/nháy/here-doc chưa xong thì Enter xuống dòng chờ gõ tiếp; cả khối lưu thành 1 entry lịch sử.
 - **Job control như bash** — Ctrl-C chỉ dừng lệnh đang chạy, **không bao giờ giết shell**; Ctrl-Z tạm dừng → `fg` / `bg` / `jobs` / `kill %1` / `wait` / `disown`.
 - **🔒 Lịch sử an toàn** — lệnh chứa token / mật khẩu (GitHub, AWS, API key, `Authorization:`, `user:pass@`…) **không được lưu** vào lịch sử; `history --scrub` dọn những thứ đã lỡ lưu.
 - **`explain <lệnh>`** — usage / tham số / ví dụ + chú thích từng cột output thật (ls, ps, df, du, free). 70+ lệnh.
@@ -723,8 +725,10 @@ JakShell/
     ├── main.rs          # REPL, welcome banner, timing display
     ├── shell.rs         # Shell state, env, jobs, configs
     ├── lexer.rs         # Tokenizer
-    ├── parser.rs        # AST (pipeline, redirect, seq)
-    ├── expand.rs        # Variable / tilde / glob expansion
+    ├── parser.rs        # AST: lệnh đơn, pipeline, if/for/while/case/function, [[ ]]
+    ├── expand.rs        # Expansion: brace → tilde → ${…} / $(( )) / $( ) → IFS → glob
+    ├── arith.rs         # Số học $(( )), (( )), let
+    ├── cond.rs          # [[ … ]] và test / [
     ├── executor.rs      # Run AST: pipes, background, set -e/-u/-x, $PIPESTATUS
     ├── redirect.rs      # Redirect: fd dup/close, here-doc, noclobber
     ├── jobctl.rs        # Job control: process group, Ctrl-C/Ctrl-Z, fg/bg

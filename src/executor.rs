@@ -1,16 +1,18 @@
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom};
-use std::os::fd::AsRawFd;
-use std::process::{Command, Stdio};
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::process::Command as Process;
 use std::rc::Rc;
 
 use crate::builtins;
-use crate::expand::{expand_word, expand_word_checked, UnboundVar};
+use crate::expand::{eval_arith, eval_index_word, expand_pattern, expand_string, expand_words, fnmatch, ParamError, UnboundVar};
 use crate::lexer::WordPart;
-use crate::parser::{Pipeline, Program, Redirect, SeqOp, SimpleCommand};
-use crate::shell::Shell;
+use crate::parser::{
+    Assign, AssignValue, CaseTerm, Command, Compound, Pipeline, Program, Redirect, SeqOp, SimpleCommand, Word,
+};
+use crate::shell::{Flow, Shell};
 
 pub fn execute(shell: &Rc<RefCell<Shell>>, prog: &Program) -> Result<i32> {
     let mut last_code = 0;
@@ -30,41 +32,57 @@ pub fn execute(shell: &Rc<RefCell<Shell>>, prog: &Program) -> Result<i32> {
                 }
             }
         }
+        // Vế trái của `&&` / `||` và lệnh bị `!` không kích hoạt `set -e`.
+        let left_of_list = matches!(prog.items.get(i + 1), Some((_, SeqOp::AndIf | SeqOp::OrIf)));
+        let suppress = left_of_list || pipeline.negate;
+        if suppress {
+            shell.borrow_mut().errexit_suppressed += 1;
+        }
+        let result = run_pipeline(shell, pipeline);
+        if suppress {
+            shell.borrow_mut().errexit_suppressed -= 1;
+        }
         // Lỗi của 1 lệnh (file redirect không mở được, biến chưa gán…) chỉ làm
         // hỏng lệnh đó — script chạy tiếp như bash.
-        let code = match run_pipeline(shell, pipeline) {
+        let code = match result {
             Ok(code) => code,
             Err(e) => {
                 report_error(&e);
-                if e.downcast_ref::<UnboundVar>().is_some() {
-                    // `set -u`: script dừng hẳn; phiên tương tác bỏ phần còn lại của dòng.
-                    if !crate::jobctl::interactive() && !crate::jobctl::in_capture() {
-                        exit_shell(shell, 127);
+                let fatal = if e.downcast_ref::<UnboundVar>().is_some() {
+                    Some(127)
+                } else if e.downcast_ref::<ParamError>().is_some() {
+                    Some(127)
+                } else {
+                    None
+                };
+                if let Some(code) = fatal {
+                    // `set -u` / `${x:?}`: script dừng hẳn; phiên tương tác bỏ phần còn lại của dòng.
+                    if !crate::jobctl::interactive() {
+                        exit_shell(shell, code);
                     }
-                    last_code = 127;
-                    shell.borrow_mut().set_last_status(last_code);
-                    break;
+                    shell.borrow_mut().set_last_status(code);
+                    return Ok(code);
                 }
                 1
             }
         };
-        if pipeline.commands.len() == 1 && !pipeline.background {
-            shell.borrow_mut().pipestatus = vec![code];
-        }
         last_code = if pipeline.negate { (code == 0) as i32 } else { code };
         shell.borrow_mut().set_last_status(last_code);
-        // Ctrl-C giữa chừng → bỏ phần còn lại của dòng (`sleep 9; rm x` mà
-        // ^C thì KHÔNG chạy `rm x`), như bash.
-        if crate::jobctl::take_interrupted() {
+        // Ctrl-C giữa chừng → bỏ phần còn lại (kể cả vòng lặp bao ngoài):
+        // `sleep 9; rm x` mà ^C thì KHÔNG chạy `rm x`, như bash.
+        if crate::jobctl::interrupted() {
             last_code = 130;
             break;
         }
-        // `set -e`: lệnh lỗi làm thoát shell — trừ vế trái của `&&`/`||` và `!`.
-        let left_of_list = matches!(prog.items.get(i + 1), Some((_, SeqOp::AndIf | SeqOp::OrIf)));
-        if last_code != 0 && shell.borrow().opts.errexit && !pipeline.negate && !left_of_list {
-            if crate::jobctl::in_capture() {
-                break;
-            }
+        if shell.borrow().flow != Flow::Normal {
+            break;
+        }
+        // `set -e`: lệnh lỗi làm thoát shell (trừ trong điều kiện if/while, `&&`…).
+        let errexit = {
+            let sh = shell.borrow();
+            sh.opts.errexit && sh.errexit_suppressed == 0
+        };
+        if last_code != 0 && errexit && !suppress {
             exit_shell(shell, last_code);
         }
     }
@@ -89,6 +107,12 @@ fn exit_shell(shell: &Rc<RefCell<Shell>>, code: i32) -> ! {
     std::process::exit(code);
 }
 
+fn flush_std() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+}
+
 /// `set -x`: in lệnh đã expand ra stderr, tiền tố `$PS4` (mặc định `+ `).
 fn xtrace(shell: &Rc<RefCell<Shell>>, assigns: &[(String, String)], argv: &[String]) {
     if !shell.borrow().opts.xtrace {
@@ -104,159 +128,578 @@ fn xtrace(shell: &Rc<RefCell<Shell>>, assigns: &[(String, String)], argv: &[Stri
 }
 
 fn run_pipeline(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> {
-    // Resolve aliases on the head command (one-level, like bash default).
-    let mut commands: Vec<SimpleCommand> = pipeline.commands.clone();
-    // Command substitution `$(...)` / `` `...` `` — chạy lệnh con & thay bằng
-    // stdout TRƯỚC khi giải alias và expand biến/glob (giống thứ tự của bash).
-    for cmd in &mut commands {
-        expand_command_subs(shell, cmd)?;
+    let timer = pipeline.timed.then(TimeReport::start);
+    let code = if pipeline.background {
+        run_background(shell, pipeline)
+    } else if pipeline.commands.len() == 1 {
+        let code = run_command(shell, &pipeline.commands[0], false);
+        if let Ok(c) = &code {
+            shell.borrow_mut().set_pipestatus(&[*c]);
+        }
+        code
+    } else {
+        spawn_pipeline(shell, &pipeline.commands, false)
+    };
+    if let Some(t) = timer {
+        t.finish();
     }
-    expand_aliases(shell, &mut commands);
-
-    if commands.len() == 1 {
-        // Single command: may be a builtin (must run in our process)
-        let cmd = &commands[0];
-        let argv = build_argv(shell, cmd)?;
-        // Phép gán đứng đầu (`VAR=val cmd`) — bash-style. GDM/Xsession khởi
-        // động session qua login shell bằng dạng này nên bắt buộc phải hỗ trợ.
-        let (assigns, mut argv) = split_leading_assignments(argv);
-        let assigns = resolve_appends(shell, assigns);
-        if argv.is_empty() {
-            // Chỉ có phép gán (`VAR=val`) → set biến shell, không chạy gì.
-            xtrace(shell, &assigns, &argv);
-            for (k, v) in &assigns {
-                if let Err(e) = shell.borrow_mut().set_var(k, v) {
-                    // Gán vào biến readonly: script dừng hẳn (POSIX), REPL chỉ báo lỗi.
-                    if !crate::jobctl::interactive() && !crate::jobctl::in_capture() {
-                        report_error(&e);
-                        exit_shell(shell, 1);
-                    }
-                    return Err(e);
-                }
-            }
-            // `> file` không có lệnh: vẫn tạo / cắt rỗng file như bash.
-            if !cmd.redirects.is_empty() {
-                drop(crate::redirect::plan(shell, &cmd.redirects)?);
-            }
-            return Ok(0);
-        }
-        xtrace(shell, &assigns, &argv);
-
-        // `command x …` bỏ qua alias (chỉ từ đầu — `command` — được giải alias);
-        // `builtin x …` bắt buộc chạy builtin. `command -v/-V` là builtin riêng.
-        let mut only_builtin = false;
-        match argv[0].as_str() {
-            "command" if argv.len() > 1 && !argv[1].starts_with('-') => {
-                argv.remove(0);
-            }
-            "builtin" if argv.len() > 1 => {
-                argv.remove(0);
-                if !builtins::is_builtin(&argv[0]) {
-                    return Err(anyhow!("builtin: {}: không phải lệnh builtin", argv[0]));
-                }
-                only_builtin = true;
-            }
-            _ => {}
-        }
-
-        // Cờ --jak (do JakShell xử lý, không truyền xuống lệnh thật)
-        if !pipeline.background && !only_builtin {
-            if let Some(head) = argv.first() {
-                if argv.iter().any(|s| s == "--jak") && crate::pretty::supports(head) {
-                    let cleaned: Vec<String> = argv.iter().filter(|s| *s != "--jak").cloned().collect();
-                    return crate::pretty::run(shell, &cleaned, &cmd.redirects);
-                }
-                // curl tương tác: tự động capture + format response (separator
-                // + pretty JSON). CHỈ khi stdout là TTY và không redirect —
-                // pipe (`curl | jq`) hay `> file` vẫn nhận raw output như cũ.
-                // Tải file / stream / -v / -w tự chọn → chạy nguyên bản.
-                if head == "curl"
-                    && cmd.redirects.is_empty()
-                    && shell.borrow().ui.pretty_curl
-                    && crate::pretty::curl_wants_pretty(&argv[1..])
-                    && stdout_is_tty()
-                {
-                    return crate::pretty::run(shell, &argv, &cmd.redirects);
-                }
-            }
-        }
-
-        if builtins::is_builtin(&argv[0]) && !pipeline.background {
-            // `VAR=val builtin`: set tạm trong lúc chạy rồi khôi phục
-            // (với `exec` thì không bao giờ quay lại — env đi theo process mới).
-            let saved: Vec<(String, Option<String>)> = assigns
-                .iter()
-                .map(|(k, _)| (k.clone(), shell.borrow().get_var(k)))
-                .collect();
-            for (k, v) in &assigns {
-                shell.borrow_mut().set_var(k, v)?;
-            }
-            let result = builtins::run(shell, &argv, &cmd.redirects);
-            for (k, old) in saved {
-                let _ = match old {
-                    Some(v) => shell.borrow_mut().set_var(&k, &v),
-                    None => shell.borrow_mut().unset_var(&k),
-                };
-            }
-            return result;
-        }
-        return spawn_external(shell, &argv, &assigns, &cmd.redirects, pipeline.background);
-    }
-
-    // Multi-command pipeline. Connect with pipes.
-    spawn_pipeline(shell, &commands, pipeline.background)
+    code
 }
 
-fn expand_aliases(shell: &Rc<RefCell<Shell>>, commands: &mut [SimpleCommand]) {
-    // Only expand the first command head, repeatedly, to avoid loops.
-    if let Some(first) = commands.first_mut() {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        loop {
-            let head = match first.words.first() {
-                Some(parts) => {
-                    let strs = expand_word(&shell.borrow(), parts, false);
-                    strs.into_iter().next().unwrap_or_default()
-                }
-                None => return,
-            };
-            if seen.contains(&head) {
-                break;
+/// `cmd &` / `{ …; } &` / `a | b &` — chạy nền trong subshell (fork).
+fn run_background(shell: &Rc<RefCell<Shell>>, pipeline: &Pipeline) -> Result<i32> {
+    if pipeline.commands.len() > 1 {
+        return spawn_pipeline(shell, &pipeline.commands, true);
+    }
+    let cmd = &pipeline.commands[0];
+    let pid = fork_child(shell, 0, false, ChildKind::Job, || {}, |sh| run_command(sh, cmd, true).unwrap_or(1))?;
+    let mut sh = shell.borrow_mut();
+    sh.last_bg_pid = Some(pid);
+    let id = sh.add_job(pid, vec![pid], command_label(cmd));
+    if crate::jobctl::interactive() {
+        println!("\x1b[2m[{}] {}\x1b[0m", id, pid);
+    }
+    Ok(0)
+}
+
+/// Nhãn ngắn của lệnh cho `jobs`.
+fn command_label(cmd: &Command) -> String {
+    match cmd {
+        Command::Simple(sc) => sc.words.iter().map(|w| crate::lexer::parts_to_source(w)).collect::<Vec<_>>().join(" "),
+        Command::Compound(c, _) => match **c {
+            Compound::Group(_) => "{ … }".into(),
+            Compound::Subshell(_) => "( … )".into(),
+            Compound::If(..) => "if …".into(),
+            Compound::For { .. } | Compound::ArithFor { .. } => "for …".into(),
+            Compound::While { until, .. } => if until { "until …" } else { "while …" }.into(),
+            Compound::Case { .. } => "case …".into(),
+            Compound::Cond(_) => "[[ … ]]".into(),
+            Compound::Arith(ref e) => format!("(({}))", e),
+        },
+        Command::FuncDef(n, _) => format!("{}()", n),
+    }
+}
+
+/// Chạy 1 lệnh trong shell hiện tại. `exec_last`: đang ở tiến trình con của
+/// pipeline — lệnh ngoài được `exec` thẳng (thay tiến trình) thay vì spawn.
+pub fn run_command(shell: &Rc<RefCell<Shell>>, cmd: &Command, exec_last: bool) -> Result<i32> {
+    match cmd {
+        Command::Simple(sc) => {
+            let r = run_simple(shell, sc, exec_last);
+            finish_procsubs();
+            r
+        }
+        Command::Compound(c, redirects) => {
+            let _guard = crate::redirect::apply_in_process(crate::redirect::plan(shell, redirects)?)?;
+            run_compound(shell, c)
+        }
+        Command::FuncDef(name, body) => {
+            shell.borrow_mut().functions.insert(name.clone(), Rc::clone(body));
+            Ok(0)
+        }
+    }
+}
+
+// ── Lệnh ghép ───────────────────────────────────────────────────────────────
+
+/// Chạy điều kiện (`if`, `while`) — `set -e` không áp bên trong.
+fn run_condition(shell: &Rc<RefCell<Shell>>, cond: &Program) -> Result<i32> {
+    shell.borrow_mut().errexit_suppressed += 1;
+    let r = execute(shell, cond);
+    shell.borrow_mut().errexit_suppressed -= 1;
+    r
+}
+
+/// Sau thân vòng lặp: xử lý `break` / `continue` / `return` / Ctrl-C.
+/// Trả về true nếu phải thoát vòng lặp.
+fn loop_should_exit(shell: &Rc<RefCell<Shell>>) -> bool {
+    if crate::jobctl::interrupted() {
+        return true;
+    }
+    let mut sh = shell.borrow_mut();
+    match sh.flow {
+        Flow::Normal => false,
+        Flow::Break(n) => {
+            sh.flow = if n > 1 { Flow::Break(n - 1) } else { Flow::Normal };
+            true
+        }
+        Flow::Continue(n) => {
+            if n > 1 {
+                sh.flow = Flow::Continue(n - 1);
+                true
+            } else {
+                sh.flow = Flow::Normal;
+                false
             }
-            let alias_val = shell.borrow().aliases.get(&head).cloned();
-            if let Some(val) = alias_val {
-                seen.insert(head);
-                // Tokenize+parse the alias value to replace the head and prepend its args
-                if let Ok(tokens) = crate::lexer::tokenize(&val) {
-                    // Collect Word tokens only (alias bodies generally are commands).
-                    let mut new_words: Vec<Vec<crate::lexer::WordPart>> = Vec::new();
-                    for t in tokens {
-                        if let crate::lexer::Token::Word(parts) = t {
-                            new_words.push(parts);
+        }
+        Flow::Return => true,
+    }
+}
+
+fn run_loop_body(shell: &Rc<RefCell<Shell>>, body: &Program) -> Result<(i32, bool)> {
+    shell.borrow_mut().loop_depth += 1;
+    let r = execute(shell, body);
+    shell.borrow_mut().loop_depth -= 1;
+    let code = r?;
+    Ok((code, loop_should_exit(shell)))
+}
+
+fn run_compound(shell: &Rc<RefCell<Shell>>, c: &Compound) -> Result<i32> {
+    match c {
+        Compound::Group(p) => execute(shell, p),
+        Compound::Subshell(p) => {
+            let pid = fork_child(shell, 0, true, ChildKind::Job, || {}, |sh| execute(sh, p).unwrap_or(1))?;
+            Ok(crate::jobctl::wait_foreground(shell, pid, &[pid], "( … )", None))
+        }
+        Compound::If(arms, else_body) => {
+            for (cond, body) in arms {
+                let c = run_condition(shell, cond)?;
+                if shell.borrow().flow != Flow::Normal || crate::jobctl::interrupted() {
+                    return Ok(c);
+                }
+                if c == 0 {
+                    return execute(shell, body);
+                }
+            }
+            match else_body {
+                Some(b) => execute(shell, b),
+                None => Ok(0),
+            }
+        }
+        Compound::While { cond, body, until } => {
+            let mut code = 0;
+            loop {
+                let c = run_condition(shell, cond)?;
+                if shell.borrow().flow != Flow::Normal || crate::jobctl::interrupted() {
+                    break;
+                }
+                if (c == 0) == *until {
+                    break;
+                }
+                let (bc, exit) = run_loop_body(shell, body)?;
+                code = bc;
+                if exit {
+                    break;
+                }
+            }
+            Ok(code)
+        }
+        Compound::For { var, items, body } => {
+            let values = match items {
+                Some(words) => expand_words(shell, words)?,
+                None => shell.borrow().positional.clone(),
+            };
+            let mut code = 0;
+            for v in values {
+                shell.borrow_mut().set_var(var, &v)?;
+                let (bc, exit) = run_loop_body(shell, body)?;
+                code = bc;
+                if exit {
+                    break;
+                }
+            }
+            Ok(code)
+        }
+        Compound::ArithFor { init, cond, step, body } => {
+            if !init.is_empty() {
+                eval_arith(shell, init)?;
+            }
+            let mut code = 0;
+            loop {
+                if !cond.is_empty() && eval_arith(shell, cond)? == 0 {
+                    break;
+                }
+                let (bc, exit) = run_loop_body(shell, body)?;
+                code = bc;
+                if exit {
+                    break;
+                }
+                if !step.is_empty() {
+                    eval_arith(shell, step)?;
+                }
+            }
+            Ok(code)
+        }
+        Compound::Case { word, arms } => {
+            let subject = expand_string(shell, word)?;
+            let nocase = shell.borrow().shopts.nocasematch;
+            let mut code = 0;
+            let mut fall_through = false;
+            for arm in arms {
+                let mut matched = fall_through;
+                if !matched {
+                    for p in &arm.patterns {
+                        if fnmatch(&expand_pattern(shell, p)?, &subject, nocase) {
+                            matched = true;
+                            break;
                         }
                     }
-                    if !new_words.is_empty() {
-                        let rest: Vec<Vec<crate::lexer::WordPart>> = first.words.iter().skip(1).cloned().collect();
-                        new_words.extend(rest);
-                        first.words = new_words;
-                        continue;
+                }
+                if !matched {
+                    continue;
+                }
+                code = execute(shell, &arm.body)?;
+                if shell.borrow().flow != Flow::Normal {
+                    return Ok(code);
+                }
+                match arm.term {
+                    CaseTerm::Break => return Ok(code),
+                    CaseTerm::FallThrough => fall_through = true,
+                    CaseTerm::Continue => fall_through = false,
+                }
+            }
+            Ok(code)
+        }
+        Compound::Cond(e) => {
+            if shell.borrow().opts.xtrace {
+                eprintln!("{}[[ … ]]", shell.borrow().get_var("PS4").unwrap_or_else(|| "+ ".into()));
+            }
+            match crate::cond::eval(shell, e) {
+                Ok(true) => Ok(0),
+                Ok(false) => Ok(1),
+                Err(err) => {
+                    report_error(&err);
+                    Ok(2)
+                }
+            }
+        }
+        Compound::Arith(expr) => match eval_arith(shell, expr) {
+            Ok(v) => Ok((v == 0) as i32),
+            Err(err) => {
+                report_error(&err);
+                Ok(1)
+            }
+        },
+    }
+}
+
+// ── Lệnh đơn ────────────────────────────────────────────────────────────────
+
+/// Alias: chỉ áp cho từ đầu là chữ thường không nháy (`\ls`, `'ls'` bỏ qua
+/// alias như bash). Lặp được (alias trỏ alias) nhưng không vòng lại chính nó.
+fn expand_aliases(shell: &Rc<RefCell<Shell>>, words: &[Word]) -> Vec<Word> {
+    let mut words = words.to_vec();
+    if !shell.borrow().shopts.expand_aliases {
+        return words;
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let head = match words.first().map(|w| w.as_slice()) {
+            Some([WordPart::Literal(s)]) => s.clone(),
+            _ => return words,
+        };
+        if !seen.insert(head.clone()) {
+            return words;
+        }
+        let Some(val) = shell.borrow().aliases.get(&head).cloned() else {
+            return words;
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&val) else {
+            return words;
+        };
+        let mut new_words: Vec<Word> = tokens
+            .into_iter()
+            .filter_map(|t| match t {
+                crate::lexer::Token::Word(parts) => Some(parts),
+                _ => None,
+            })
+            .collect();
+        if new_words.is_empty() {
+            return words;
+        }
+        new_words.extend(words.into_iter().skip(1));
+        words = new_words;
+    }
+}
+
+/// Mở rộng argv. Với declare/local/export/readonly, đối số dạng `x=...` không
+/// bị tách từ / glob (như bash).
+fn build_argv(shell: &Rc<RefCell<Shell>>, words: &[Word]) -> Result<Vec<String>> {
+    let decl = matches!(words.first().map(|w| w.as_slice()), Some([WordPart::Literal(s)]) if crate::parser::is_decl_command(s));
+    if !decl {
+        return expand_words(shell, words);
+    }
+    let mut argv = Vec::new();
+    for w in words {
+        let assignment_like = matches!(w.first(), Some(WordPart::Literal(s)) if s.contains('=') && !s.starts_with('-'));
+        if assignment_like {
+            argv.push(expand_string(shell, w)?);
+        } else {
+            argv.extend(expand_words(shell, std::slice::from_ref(w))?);
+        }
+    }
+    Ok(argv)
+}
+
+/// Giá trị phép gán: không tách từ / glob; `~` đầu giá trị được thay.
+fn assign_value(shell: &Rc<RefCell<Shell>>, value: &Word) -> Result<String> {
+    if let Some(WordPart::Literal(s)) = value.first() {
+        if s == "~" || s.starts_with("~/") || s.starts_with("~:") {
+            let home = shell.borrow().get_var("HOME").unwrap_or_default();
+            let mut w = value.clone();
+            w[0] = WordPart::Literal(format!("{}{}", home, &s[1..]));
+            return expand_string(shell, &w);
+        }
+    }
+    expand_string(shell, value)
+}
+
+/// Thực hiện 1 phép gán (bền vững) — scalar, phần tử mảng, hoặc cả mảng.
+pub fn perform_assign(shell: &Rc<RefCell<Shell>>, a: &Assign) -> Result<()> {
+    match &a.value {
+        AssignValue::Scalar(w) => {
+            let v = assign_value(shell, w)?;
+            match &a.index {
+                Some(raw) => {
+                    let idx = eval_index_word(shell, &a.name, raw)?;
+                    let v = if a.append { shell.borrow().get_index(&a.name, &idx).unwrap_or_default() + &v } else { v };
+                    shell.borrow_mut().set_index(&a.name, idx, &v)
+                }
+                None => {
+                    let v = if shell.borrow().integers.contains(&a.name) {
+                        // `declare -i`: giá trị được tính như biểu thức số học.
+                        let n = eval_arith(shell, &v)?;
+                        let base = if a.append { eval_arith(shell, &a.name)? } else { 0 };
+                        (base + n).to_string()
+                    } else if a.append {
+                        shell.borrow().get_var(&a.name).unwrap_or_default() + &v
+                    } else {
+                        v
+                    };
+                    shell.borrow_mut().set_var(&a.name, &v)
+                }
+            }
+        }
+        AssignValue::Array(items) => {
+            if shell.borrow().is_assoc(&a.name) {
+                let mut map = if a.append { shell.borrow().assocs.get(&a.name).cloned().unwrap_or_default() } else { BTreeMap::new() };
+                for item in items {
+                    let (key, val) = split_keyed(shell, item)?;
+                    let key = key.ok_or_else(|| anyhow!("{}: mảng kết hợp cần dạng [khoá]=giá_trị", a.name))?;
+                    map.insert(key, val);
+                }
+                return shell.borrow_mut().set_assoc(&a.name, map);
+            }
+            let mut arr = if a.append { shell.borrow().arrays.get(&a.name).cloned().unwrap_or_default() } else { BTreeMap::new() };
+            let mut next = arr.keys().next_back().map_or(0, |k| k + 1);
+            for item in items {
+                match split_keyed(shell, item)? {
+                    (Some(key), val) => {
+                        let i = eval_arith(shell, &key)?;
+                        arr.insert(i, val);
+                        next = i + 1;
+                    }
+                    (None, _) => {
+                        // Phần tử thường: expand đầy đủ (tách từ, glob) như bash.
+                        for v in expand_words(shell, std::slice::from_ref(item))? {
+                            arr.insert(next, v);
+                            next += 1;
+                        }
                     }
                 }
-                break;
-            } else {
-                break;
             }
+            shell.borrow_mut().set_array(&a.name, arr)
         }
     }
 }
 
-fn build_argv(shell: &Rc<RefCell<Shell>>, cmd: &SimpleCommand) -> Result<Vec<String>> {
-    let mut argv = Vec::new();
-    for (i, w) in cmd.words.iter().enumerate() {
-        // Only glob expand for non-head words (head is the command itself).
-        let do_glob = i > 0;
-        argv.extend(expand_word_checked(&shell.borrow(), w, do_glob)?);
+/// Phần tử `[k]=v` trong `(…)` → (Some(k), v); phần tử thường → (None, "").
+fn split_keyed(shell: &Rc<RefCell<Shell>>, item: &Word) -> Result<(Option<String>, String)> {
+    if let Some(WordPart::Literal(s)) = item.first() {
+        if let Some(rest) = s.strip_prefix('[') {
+            if let Some(close) = rest.find("]=") {
+                let key = rest[..close].to_string();
+                let mut value: Word = Vec::new();
+                let tail = &rest[close + 2..];
+                if !tail.is_empty() {
+                    value.push(WordPart::Literal(tail.to_string()));
+                }
+                value.extend(item[1..].iter().cloned());
+                let key = expand_string(shell, &crate::lexer::parse_embedded(&key)?)?;
+                return Ok((Some(key), expand_string(shell, &value)?));
+            }
+        }
     }
-    Ok(argv)
+    Ok((None, String::new()))
+}
+
+fn run_simple(shell: &Rc<RefCell<Shell>>, sc: &SimpleCommand, exec_last: bool) -> Result<i32> {
+    let words = expand_aliases(shell, &sc.words);
+    shell.borrow_mut().last_cmdsub_status = None;
+    let mut argv = build_argv(shell, &words)?;
+
+    if argv.is_empty() {
+        // Chỉ có phép gán / redirect: gán bền vững, tạo file redirect.
+        for a in &sc.assigns {
+            if let Err(e) = perform_assign(shell, a) {
+                // Gán vào biến readonly: script dừng hẳn (POSIX), REPL chỉ báo lỗi.
+                if !crate::jobctl::interactive() {
+                    report_error(&e);
+                    exit_shell(shell, 1);
+                }
+                return Err(e);
+            }
+        }
+        if shell.borrow().opts.xtrace {
+            let shown: Vec<(String, String)> = sc
+                .assigns
+                .iter()
+                .map(|a| (a.name.clone(), shell.borrow().get_var(&a.name).unwrap_or_default()))
+                .collect();
+            xtrace(shell, &shown, &[]);
+        }
+        if !sc.redirects.is_empty() {
+            drop(crate::redirect::plan(shell, &sc.redirects)?);
+        }
+        // `x=$(false)` → `$?` = exit code của lệnh con.
+        return Ok(shell.borrow_mut().last_cmdsub_status.take().unwrap_or(0));
+    }
+
+    // Phép gán tạm cho riêng lệnh này (`VAR=v cmd`).
+    let mut temp: Vec<(String, String)> = Vec::new();
+    for a in &sc.assigns {
+        let AssignValue::Scalar(w) = &a.value else {
+            return Err(anyhow!("{}: không gán mảng tạm cho lệnh được", a.name));
+        };
+        let mut v = assign_value(shell, w)?;
+        if a.append {
+            v = shell.borrow().get_var(&a.name).unwrap_or_default() + &v;
+        }
+        temp.push((a.name.clone(), v));
+    }
+    xtrace(shell, &temp, &argv);
+
+    // `command x …` bỏ qua function/alias; `builtin x …` bắt buộc builtin.
+    let mut skip_functions = false;
+    let mut only_builtin = false;
+    match argv[0].as_str() {
+        "command" if argv.len() > 1 && !argv[1].starts_with('-') => {
+            argv.remove(0);
+            skip_functions = true;
+        }
+        "builtin" if argv.len() > 1 => {
+            argv.remove(0);
+            if !builtins::is_builtin(&argv[0]) {
+                return Err(anyhow!("builtin: {}: không phải lệnh builtin", argv[0]));
+            }
+            only_builtin = true;
+        }
+        _ => {}
+    }
+
+    // Function (ưu tiên hơn builtin và lệnh ngoài, như bash).
+    if !skip_functions && !only_builtin {
+        let func = shell.borrow().functions.get(&argv[0]).cloned();
+        if let Some(body) = func {
+            let _guard = crate::redirect::apply_in_process(crate::redirect::plan(shell, &sc.redirects)?)?;
+            return with_temp_vars(shell, &temp, true, |sh| call_function(sh, &argv[0], &body, &argv[1..]));
+        }
+    }
+
+    if !only_builtin {
+        // Cờ --jak (do JakShell xử lý, không truyền xuống lệnh thật)
+        if argv.iter().any(|s| s == "--jak") && crate::pretty::supports(&argv[0]) {
+            let cleaned: Vec<String> = argv.iter().filter(|s| *s != "--jak").cloned().collect();
+            return crate::pretty::run(shell, &cleaned, &sc.redirects);
+        }
+        // curl tương tác: tự động capture + format response (separator
+        // + pretty JSON). CHỈ khi stdout là TTY và không redirect —
+        // pipe (`curl | jq`) hay `> file` vẫn nhận raw output như cũ.
+        // Tải file / stream / -v / -w tự chọn → chạy nguyên bản.
+        if argv[0] == "curl"
+            && sc.redirects.is_empty()
+            && shell.borrow().ui.pretty_curl
+            && crate::pretty::curl_wants_pretty(&argv[1..])
+            && stdout_is_tty()
+        {
+            return crate::pretty::run(shell, &argv, &sc.redirects);
+        }
+    }
+
+    if builtins::is_builtin(&argv[0]) {
+        let result = with_temp_vars(shell, &temp, false, |sh| builtins::run(sh, &argv, &sc.redirects));
+        // `declare -a a=(…)` / `local a=(…)`: builtin đã khai báo tên, giờ gán mảng.
+        if result.is_ok() {
+            for (_, a) in &sc.array_args {
+                perform_assign(shell, a)?;
+            }
+        }
+        return result;
+    }
+
+    // Special "jak" subcommand router (runs in our process)
+    if argv[0] == "jak" {
+        let _guard = crate::redirect::apply_in_process(crate::redirect::plan(shell, &sc.redirects)?)?;
+        return crate::jak::run(shell, &argv[1..]);
+    }
+
+    spawn_external(shell, &argv, &temp, &sc.redirects, exec_last)
+}
+
+/// Gán tạm `VAR=v` trong lúc chạy builtin / function rồi khôi phục. Với
+/// function, biến tạm còn được export (lệnh con bên trong thấy), như bash.
+fn with_temp_vars<T>(
+    shell: &Rc<RefCell<Shell>>,
+    temp: &[(String, String)],
+    export: bool,
+    f: impl FnOnce(&Rc<RefCell<Shell>>) -> Result<T>,
+) -> Result<T> {
+    let saved: Vec<(String, Option<String>, bool)> = temp
+        .iter()
+        .map(|(k, _)| {
+            let sh = shell.borrow();
+            (k.clone(), sh.get_var(k), sh.exported.contains(k))
+        })
+        .collect();
+    for (k, v) in temp {
+        let mut sh = shell.borrow_mut();
+        if export {
+            sh.export_var(k, Some(v))?;
+        } else {
+            sh.set_var(k, v)?;
+        }
+    }
+    let result = f(shell);
+    for (k, old, was_exported) in saved {
+        let mut sh = shell.borrow_mut();
+        let _ = match old {
+            Some(v) => sh.set_var(&k, &v),
+            None => sh.unset_var(&k),
+        };
+        if export && !was_exported {
+            sh.unexport_var(&k);
+        }
+    }
+    result
+}
+
+fn call_function(shell: &Rc<RefCell<Shell>>, name: &str, body: &Rc<Command>, args: &[String]) -> Result<i32> {
+    if shell.borrow().funcnames.len() >= 1000 {
+        return Err(anyhow!("{}: gọi đệ quy quá sâu (> 1000 tầng)", name));
+    }
+    let saved_positional = {
+        let mut sh = shell.borrow_mut();
+        sh.funcnames.push(name.to_string());
+        sh.local_frames.push(Vec::new());
+        std::mem::replace(&mut sh.positional, args.to_vec())
+    };
+    // Vòng lặp bên ngoài function không bị `break` trong function chạm tới.
+    let saved_loop = std::mem::replace(&mut shell.borrow_mut().loop_depth, 0);
+    let result = run_command(shell, body, false);
+    let mut sh = shell.borrow_mut();
+    sh.loop_depth = saved_loop;
+    sh.pop_locals();
+    sh.funcnames.pop();
+    sh.positional = saved_positional;
+    if sh.flow == Flow::Return {
+        sh.flow = Flow::Normal;
+        // `return` không đối số → exit code lệnh cuối (đã nằm trong $?).
+        return Ok(sh.last_status());
+    }
+    if matches!(sh.flow, Flow::Break(_) | Flow::Continue(_)) {
+        sh.flow = Flow::Normal;
+    }
+    result
 }
 
 fn spawn_external(
@@ -264,216 +707,45 @@ fn spawn_external(
     argv: &[String],
     assigns: &[(String, String)],
     redirects: &[Redirect],
-    background: bool,
+    exec_last: bool,
 ) -> Result<i32> {
     let prog = &argv[0];
     let args = &argv[1..];
 
-    // Special "jak" subcommand router (runs in our process)
-    if prog == "jak" {
-        let _guard = crate::redirect::apply_in_process(crate::redirect::plan(shell, redirects)?)?;
-        return crate::jak::run(shell, args);
-    }
-
-    let mut builder = Command::new(prog);
+    let mut builder = Process::new(prog);
     builder.args(args);
     builder.envs(assigns.iter().map(|(k, v)| (k, v)));
     builder.current_dir(&shell.borrow().cwd);
-
     crate::redirect::apply_to_command(&mut builder, crate::redirect::plan(shell, redirects)?);
-    crate::jobctl::prepare(&mut builder, 0, !background);
 
+    if exec_last {
+        // Tiến trình con của pipeline: thay luôn bằng lệnh thật.
+        use std::os::unix::process::CommandExt;
+        crate::jobctl::reset_for_exec(&mut builder);
+        flush_std();
+        let err = builder.exec();
+        return Ok(not_found_or_failed(prog, &err));
+    }
+
+    crate::jobctl::prepare(&mut builder, 0, true);
     match builder.spawn() {
         Ok(child) => {
             let pid = child.id() as i32;
-            let pgid = crate::jobctl::after_spawn(pid, 0, !background);
-            let cmdline = argv.join(" ");
-            if background {
-                shell.borrow_mut().last_bg_pid = Some(pid);
-                let id = shell.borrow_mut().add_job(pgid, vec![pid], cmdline);
-                if crate::jobctl::interactive() {
-                    println!("\x1b[2m[{}] {}\x1b[0m", id, pid);
-                }
-                Ok(0)
-            } else {
-                Ok(crate::jobctl::wait_foreground(shell, pgid, &[pid], &cmdline, None))
-            }
+            let pgid = crate::jobctl::after_spawn(pid, 0, true);
+            Ok(crate::jobctl::wait_foreground(shell, pgid, &[pid], &argv.join(" "), None))
         }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("jaksh: {}: {}", crate::i18n::t("common.not_found"), prog);
-                Ok(127)
-            } else {
-                eprintln!("jaksh: không chạy được {}: {}", prog, e);
-                Ok(126)
-            }
-        }
+        Err(e) => Ok(not_found_or_failed(prog, &e)),
     }
 }
 
-fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[SimpleCommand], background: bool) -> Result<i32> {
-    let n = commands.len();
-    let mut children = Vec::with_capacity(n);
-    let mut prev_stdout: Option<Stdio> = None;
-    // Output đã bắt của builtin đứng trước — ghi vào stdin lệnh kế tiếp.
-    let mut pending_input: Option<Vec<u8>> = None;
-    // Exit code từng vị trí trong pipeline: builtin biết ngay (Some), lệnh ngoài
-    // điền sau khi chờ (None) — cho `$PIPESTATUS` và `set -o pipefail`.
-    let mut slots: Vec<Option<i32>> = Vec::with_capacity(n);
-    let mut pgid = 0;
-    // Lỗi giữa chừng: vẫn phải chờ các lệnh đã spawn (và lấy lại terminal từ
-    // chúng) trước khi trả lỗi — không return sớm.
-    let mut failure: Option<Result<i32>> = None;
-
-    for (i, cmd) in commands.iter().enumerate() {
-        let argv = match build_argv(shell, cmd) {
-            Ok(a) => a,
-            Err(e) => {
-                failure = Some(Err(e));
-                break;
-            }
-        };
-        let (assigns, mut argv) = split_leading_assignments(argv);
-        let assigns = resolve_appends(shell, assigns);
-        if argv.len() > 1 && argv[0] == "command" && !argv[1].starts_with('-') {
-            argv.remove(0);
-        }
-        if argv.is_empty() {
-            failure = Some(Err(anyhow!("lệnh rỗng trong pipeline")));
-            break;
-        }
-        xtrace(shell, &assigns, &argv);
-        let prog = &argv[0];
-        let args = &argv[1..];
-
-        // Builtin chỉ-in (`history`, `alias`, …) chạy ngay trong shell: output
-        // được bắt lại rồi nạp làm stdin cho lệnh sau. Builtin khác rơi về lệnh
-        // ngoài cùng tên (vd /bin/echo) như trước.
-        if builtins::is_pipe_safe(prog) {
-            prev_stdout = None;
-            if i < n - 1 {
-                match builtins::run_captured(shell, &argv, &cmd.redirects) {
-                    Ok((code, out)) => {
-                        pending_input = Some(out);
-                        slots.push(Some(code));
-                    }
-                    Err(e) => {
-                        failure = Some(Err(e));
-                        break;
-                    }
-                }
-            } else {
-                match builtins::run(shell, &argv, &cmd.redirects) {
-                    Ok(code) => slots.push(Some(code)),
-                    Err(e) => {
-                        failure = Some(Err(e));
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-
-        let mut builder = Command::new(prog);
-        builder.args(args);
-        builder.envs(assigns);
-        builder.current_dir(&shell.borrow().cwd);
-
-        if let Some(stdin) = prev_stdout.take() {
-            builder.stdin(stdin);
-        } else if pending_input.is_some() {
-            builder.stdin(Stdio::piped());
-        }
-        if i < n - 1 {
-            builder.stdout(Stdio::piped());
-        }
-        match crate::redirect::plan(shell, &cmd.redirects) {
-            Ok(plan) => crate::redirect::apply_to_command(&mut builder, plan),
-            Err(e) => {
-                failure = Some(Err(e));
-                break;
-            }
-        }
-        // Cả pipeline chung 1 process group (trưởng = lệnh đầu tiên được spawn).
-        crate::jobctl::prepare(&mut builder, pgid, !background);
-
-        match builder.spawn() {
-            Ok(mut child) => {
-                pgid = crate::jobctl::after_spawn(child.id() as i32, pgid, !background);
-                if let (Some(data), Some(mut stdin)) = (pending_input.take(), child.stdin.take()) {
-                    std::thread::spawn(move || {
-                        let _ = std::io::Write::write_all(&mut stdin, &data);
-                    });
-                }
-                if i < n - 1 {
-                    if let Some(s) = child.stdout.take() {
-                        prev_stdout = Some(Stdio::from(s));
-                    }
-                }
-                children.push((child, argv.join(" ")));
-                slots.push(None);
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("jaksh: {}: {}", crate::i18n::t("common.not_found"), prog);
-                } else {
-                    eprintln!("jaksh: không chạy được {}: {}", prog, e);
-                }
-                failure = Some(Ok(127));
-                break;
-            }
-        }
-    }
-    // Đóng đầu đọc còn treo để lệnh trước nhận EOF/SIGPIPE thay vì chờ mãi.
-    drop(prev_stdout);
-
-    let pids: Vec<i32> = children.iter().map(|(c, _)| c.id() as i32).collect();
-    let cmdline = children.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>().join(" | ");
-    // Child của std không tự wait khi drop — việc thu dọn do jobctl/reap_jobs.
-    drop(children);
-    if pids.is_empty() {
-        if let Some(f) = failure {
-            return f;
-        }
-        return Ok(finish_pipestatus(shell, slots));
-    }
-    if let Some(f) = failure {
-        if background {
-            shell.borrow_mut().add_job(pgid, pids, cmdline);
-        } else {
-            crate::jobctl::wait_foreground(shell, pgid, &pids, &cmdline, None);
-        }
-        return f;
-    }
-    if background {
-        shell.borrow_mut().last_bg_pid = pids.last().copied();
-        let id = shell.borrow_mut().add_job(pgid, pids.clone(), cmdline);
-        if crate::jobctl::interactive() {
-            println!("\x1b[2m[{}] {}\x1b[0m", id, pids.last().copied().unwrap_or(0));
-        }
-        return Ok(0);
-    }
-    let code = crate::jobctl::wait_foreground(shell, pgid, &pids, &cmdline, None);
-    if code == 128 + libc::SIGTSTP && shell.borrow().jobs.iter().any(|j| j.pgid == pgid) {
-        return Ok(code); // bị Ctrl-Z — pipeline chưa xong
-    }
-    // Ghép exit code lệnh ngoài (theo thứ tự) vào các ô còn trống.
-    let mut external = std::mem::take(&mut shell.borrow_mut().pipestatus).into_iter();
-    let slots = slots.into_iter().map(|s| s.or_else(|| external.next())).collect();
-    Ok(finish_pipestatus(shell, slots))
-}
-
-/// Lưu `$PIPESTATUS` và tính exit code của pipeline (lệnh cuối, hoặc lệnh lỗi
-/// cuối cùng khi `set -o pipefail`).
-fn finish_pipestatus(shell: &Rc<RefCell<Shell>>, slots: Vec<Option<i32>>) -> i32 {
-    let codes: Vec<i32> = slots.into_iter().map(|c| c.unwrap_or(0)).collect();
-    let code = if shell.borrow().opts.pipefail {
-        codes.iter().rev().find(|&&c| c != 0).copied().unwrap_or(0)
+fn not_found_or_failed(prog: &str, e: &std::io::Error) -> i32 {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        eprintln!("jaksh: {}: {}", crate::i18n::t("common.not_found"), prog);
+        127
     } else {
-        codes.last().copied().unwrap_or(0)
-    };
-    shell.borrow_mut().pipestatus = codes;
-    code
+        eprintln!("jaksh: không chạy được {}: {}", prog, e);
+        126
+    }
 }
 
 /// stdout có phải terminal không — quyết định có bật auto-pretty (curl, …).
@@ -481,223 +753,250 @@ fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
-/// Thay mọi `WordPart::CmdSub` trong 1 lệnh (cả words lẫn đích redirect) bằng
-/// kết quả chạy lệnh con. Gọi ở đầu `run_pipeline`, khi CHƯA giữ borrow nào của
-/// shell — nên chạy lệnh con (mượn shell mutably) an toàn.
-fn expand_command_subs(shell: &Rc<RefCell<Shell>>, cmd: &mut SimpleCommand) -> Result<()> {
-    for w in &mut cmd.words {
-        expand_parts_cmdsub(shell, w)?;
-    }
-    for r in &mut cmd.redirects {
-        expand_parts_cmdsub(shell, &mut r.target)?;
-    }
-    Ok(())
+// ── Fork: pipeline, subshell, nền, $(...), <(...) ───────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildKind {
+    /// Thành viên của 1 job (pipeline / subshell / nền) — có job control.
+    Job,
+    /// `$(...)` / `<(...)` — ở chung group với shell, không job control.
+    Capture,
 }
 
-fn expand_parts_cmdsub(shell: &Rc<RefCell<Shell>>, parts: &mut Vec<WordPart>) -> Result<()> {
-    if !parts.iter().any(|p| matches!(p, WordPart::CmdSub(_))) {
-        return Ok(());
+/// Fork một subshell: con chạy `setup` (nối fd) rồi `body`, thoát bằng exit
+/// code của body; cha nhận pid. Biến / thư mục / function của con là bản sao —
+/// thay đổi không ảnh hưởng shell cha (đúng ngữ nghĩa subshell của bash).
+fn fork_child(
+    shell: &Rc<RefCell<Shell>>,
+    pgid: i32,
+    foreground: bool,
+    kind: ChildKind,
+    setup: impl FnOnce(),
+    body: impl FnOnce(&Rc<RefCell<Shell>>) -> i32,
+) -> Result<i32> {
+    flush_std();
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(anyhow!("fork thất bại: {}", std::io::Error::last_os_error()));
     }
-    let mut out = Vec::with_capacity(parts.len());
-    for p in parts.drain(..) {
-        match p {
-            WordPart::CmdSub(src) => {
-                let captured = capture_command_output(shell, &src)?;
-                // Quoted → không glob & không tách từ; đúng nhu cầu phổ biến
-                // nhất (`eval "$(brew shellenv)"`, `x="$(cmd)"`, `$(git ...)`),
-                // và khớp cách shell này vốn không tách từ khi expand biến.
-                out.push(WordPart::Quoted(captured));
-            }
-            other => out.push(other),
+    if pid == 0 {
+        match kind {
+            ChildKind::Job => crate::jobctl::child_setup(pgid, foreground),
+            ChildKind::Capture => crate::jobctl::child_setup_capture(),
         }
+        setup();
+        let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell))).unwrap_or(1);
+        flush_std();
+        unsafe { libc::_exit(code) };
     }
-    *parts = out;
-    Ok(())
+    if kind == ChildKind::Job {
+        crate::jobctl::after_spawn(pid, pgid, foreground);
+    }
+    Ok(pid)
 }
 
-/// Chạy `src` như một chương trình con và thu lại stdout của nó — phần lõi của
-/// command substitution. Chạy IN-PROCESS trong shell hiện tại (không fork một
-/// subshell thật), nên side effect như `cd` / gán biến bên trong `$(...)` sẽ
-/// ảnh hưởng shell cha; đủ dùng cho các lệnh chỉ đọc/in dữ liệu (brew shellenv,
-/// git rev-parse, date, pwd, ...). Thu bằng cách hoán fd 1 sang FILE TẠM (không
-/// dùng pipe) để tránh kẹt khi output lớn hơn buffer pipe.
-fn capture_command_output(shell: &Rc<RefCell<Shell>>, src: &str) -> Result<String> {
+fn os_pipe() -> Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(anyhow!("pipe: {}", std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[Command], background: bool) -> Result<i32> {
+    let n = commands.len();
+    let mut pids = Vec::with_capacity(n);
+    let mut pgid = 0;
+    let mut prev_read: Option<OwnedFd> = None;
+    let mut failure = None;
+
+    for (i, cmd) in commands.iter().enumerate() {
+        let next = if i + 1 < n {
+            match os_pipe() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        } else {
+            None
+        };
+        let stdin_fd = prev_read.as_ref().map(|f| f.as_raw_fd());
+        let stdout_fd = next.as_ref().map(|(_, w)| w.as_raw_fd());
+        let next_read_fd = next.as_ref().map(|(r, _)| r.as_raw_fd());
+        let setup = move || unsafe {
+            if let Some(fd) = stdin_fd {
+                libc::dup2(fd, 0);
+                libc::close(fd);
+            }
+            if let Some(fd) = stdout_fd {
+                libc::dup2(fd, 1);
+                libc::close(fd);
+            }
+            if let Some(fd) = next_read_fd {
+                libc::close(fd);
+            }
+        };
+        // Mỗi thành viên là 1 subshell; lệnh ngoài trong đó được exec thẳng.
+        match fork_child(shell, pgid, !background, ChildKind::Job, setup, |sh| run_command(sh, cmd, true).unwrap_or_else(|e| {
+            report_error(&e);
+            1
+        })) {
+            Ok(pid) => {
+                if pgid == 0 {
+                    pgid = pid;
+                }
+                pids.push(pid);
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+        // Cha đóng đầu ghi + đầu đọc cũ; giữ đầu đọc mới cho lệnh sau.
+        prev_read = next.map(|(r, _w)| r);
+    }
+    drop(prev_read);
+
+    let label = commands.iter().map(command_label).collect::<Vec<_>>().join(" | ");
+    if background {
+        let mut sh = shell.borrow_mut();
+        sh.last_bg_pid = pids.last().copied();
+        let id = sh.add_job(pgid, pids.clone(), label);
+        if crate::jobctl::interactive() {
+            println!("\x1b[2m[{}] {}\x1b[0m", id, pids.last().copied().unwrap_or(0));
+        }
+        return failure.map_or(Ok(0), Err);
+    }
+    if pids.is_empty() {
+        return Err(failure.unwrap_or_else(|| anyhow!("pipeline rỗng")));
+    }
+    let code = crate::jobctl::wait_foreground(shell, pgid, &pids, &label, None);
+    failure.map_or(Ok(code), Err)
+}
+
+/// `$(...)`: chạy trong subshell (fork), trả stdout đã bỏ newline cuối. Thay
+/// đổi biến / `cd` bên trong không rò ra ngoài, như bash.
+pub fn command_substitution(shell: &Rc<RefCell<Shell>>, src: &str) -> Result<String> {
     let tokens = crate::lexer::tokenize(src)?;
     let prog = crate::parser::parse(&tokens)?;
-
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "jaksh-cmdsub-{}-{}",
-        std::process::id(),
-        next_capture_id()
-    ));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|e| anyhow!("$(...): không tạo được file tạm: {}", e))?;
-
-    // Hoán fd 1 → file trong một scope; drop sẽ khôi phục fd gốc. `$(...)`
-    // không có job control (như bash): lệnh con ở chung group với shell.
-    {
-        let _nojobs = crate::jobctl::Suspend::new();
-        let _swap = FdSwap::new(libc::STDOUT_FILENO, file.as_raw_fd())?;
-        flush_std();
-        let _ = execute(shell, &prog);
-        flush_std();
-    }
-
-    let mut file = file;
-    file.seek(SeekFrom::Start(0)).ok();
-    let mut s = String::new();
-    file.read_to_string(&mut s).ok();
-    let _ = std::fs::remove_file(&path);
-
+    let (read_end, write_end) = os_pipe()?;
+    let wfd = write_end.as_raw_fd();
+    let rfd = read_end.as_raw_fd();
+    let pid = fork_child(
+        shell,
+        0,
+        false,
+        ChildKind::Capture,
+        move || unsafe {
+            libc::dup2(wfd, 1);
+            libc::close(wfd);
+            libc::close(rfd);
+        },
+        |sh| {
+            let code = execute(sh, &prog).unwrap_or(1);
+            // `exit` bên trong đã thoát; còn lại trả exit code lệnh cuối.
+            code
+        },
+    )?;
+    drop(write_end);
+    let mut out = Vec::new();
+    let mut file = std::fs::File::from(read_end);
+    let _ = file.read_to_end(&mut out);
+    let status = wait_pid(pid);
+    shell.borrow_mut().last_cmdsub_status = Some(status);
+    let mut s = String::from_utf8_lossy(&out).into_owned();
     // Bỏ mọi newline ở cuối (đúng như POSIX command substitution).
     let end = s.trim_end_matches('\n').len();
     s.truncate(end);
     Ok(s)
 }
 
-fn flush_std() {
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-}
-
-/// Bộ đếm để đặt tên file tạm duy nhất trong 1 tiến trình (tránh đụng khi có
-/// nhiều `$(...)` lồng/nối tiếp).
-fn next_capture_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Hoán đổi tạm một file descriptor (thường là stdout=1) sang `new_fd`; khi drop
-/// sẽ khôi phục nguyên trạng. Dùng cho command substitution.
-struct FdSwap {
-    target: i32,
-    saved: i32,
-}
-
-impl FdSwap {
-    fn new(target: i32, new_fd: i32) -> Result<Self> {
-        unsafe {
-            let saved = libc::dup(target);
-            if saved < 0 {
-                return Err(anyhow!("dup({}) thất bại", target));
-            }
-            if libc::dup2(new_fd, target) < 0 {
-                libc::close(saved);
-                return Err(anyhow!("dup2 thất bại"));
-            }
-            Ok(FdSwap { target, saved })
-        }
-    }
-}
-
-impl Drop for FdSwap {
-    fn drop(&mut self) {
-        flush_std();
-        unsafe {
-            libc::dup2(self.saved, self.target);
-            libc::close(self.saved);
-        }
-    }
-}
-
-/// Tách các phép gán `VAR=val` đứng đầu lệnh (bash-style):
-/// `A=1 B=2 cmd args` → ([("A","1"),("B","2")], ["cmd","args"]).
-/// Dừng peel ở word đầu tiên không phải dạng gán hợp lệ.
-fn split_leading_assignments(argv: Vec<String>) -> (Vec<(String, String)>, Vec<String>) {
-    let mut assigns = Vec::new();
-    let mut rest = Vec::new();
-    let mut done = false;
-    for w in argv {
-        if !done {
-            if let Some(kv) = parse_assignment(&w) {
-                assigns.push(kv);
+/// Chờ 1 tiến trình con, trả exit code kiểu bash.
+fn wait_pid(pid: i32) -> i32 {
+    loop {
+        let mut st = 0;
+        let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+        if r < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            done = true;
+            return 0;
         }
-        rest.push(w);
-    }
-    (assigns, rest)
-}
-
-/// `NAME+=value` → giá trị đầy đủ (nối vào giá trị hiện có).
-fn resolve_appends(shell: &Rc<RefCell<Shell>>, assigns: Vec<(String, String)>) -> Vec<(String, String)> {
-    assigns
-        .into_iter()
-        .map(|(k, v)| match k.strip_suffix('+') {
-            Some(base) => {
-                let cur = shell.borrow().get_var(base).unwrap_or_default();
-                (base.to_string(), cur + &v)
-            }
-            None => (k, v),
-        })
-        .collect()
-}
-
-/// `NAME=value` với NAME là identifier hợp lệ ([A-Za-z_][A-Za-z0-9_]*).
-/// `NAME+=value` trả về tên kèm `+` — `resolve_appends` xử lý tiếp.
-fn parse_assignment(w: &str) -> Option<(String, String)> {
-    let eq = w.find('=')?;
-    if eq == 0 {
-        return None;
-    }
-    let name = &w[..eq];
-    let name = match name.strip_suffix('+') {
-        Some(base) if !base.is_empty() => {
-            let (k, v) = parse_assignment(&format!("{}={}", base, &w[eq + 1..]))?;
-            return Some((format!("{}+", k), v));
+        if libc::WIFSIGNALED(st) {
+            return 128 + libc::WTERMSIG(st);
         }
-        _ => name,
-    };
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return None;
+        return libc::WEXITSTATUS(st);
     }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
-    }
-    Some((name.to_string(), w[eq + 1..].to_string()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+thread_local! {
+    /// fd + pid của các `<(...)` / `>(...)` đang mở cho lệnh hiện tại.
+    static PROCSUBS: RefCell<Vec<(OwnedFd, i32)>> = const { RefCell::new(Vec::new()) };
+}
 
-    #[test]
-    fn assignments_are_peeled() {
-        let (a, rest) = split_leading_assignments(vec![
-            "GNOME_SHELL_SESSION_MODE=ubuntu".into(),
-            "exec".into(),
-            "gnome-session".into(),
-        ]);
-        assert_eq!(a, vec![("GNOME_SHELL_SESSION_MODE".to_string(), "ubuntu".to_string())]);
-        assert_eq!(rest, vec!["exec", "gnome-session"]);
+/// `<(cmd)` / `>(cmd)`: chạy cmd nối với 1 pipe, trả về `/dev/fd/N`.
+pub fn process_substitution(shell: &Rc<RefCell<Shell>>, src: &str, input: bool) -> Result<String> {
+    let tokens = crate::lexer::tokenize(src)?;
+    let prog = crate::parser::parse(&tokens)?;
+    let (read_end, write_end) = os_pipe()?;
+    let (child_end, parent_end) = if input { (write_end, read_end) } else { (read_end, write_end) };
+    let cfd = child_end.as_raw_fd();
+    let pfd = parent_end.as_raw_fd();
+    let target = if input { 1 } else { 0 };
+    let pid = fork_child(
+        shell,
+        0,
+        false,
+        ChildKind::Capture,
+        move || unsafe {
+            libc::dup2(cfd, target);
+            libc::close(cfd);
+            libc::close(pfd);
+        },
+        |sh| execute(sh, &prog).unwrap_or(1),
+    )?;
+    drop(child_end);
+    // Lệnh chính (tiến trình con) phải thừa kế được fd này → bỏ CLOEXEC.
+    unsafe { libc::fcntl(pfd, libc::F_SETFD, 0) };
+    PROCSUBS.with(|p| p.borrow_mut().push((parent_end, pid)));
+    Ok(format!("/dev/fd/{}", pfd))
+}
+
+/// Sau mỗi lệnh đơn: đóng fd của `<(...)` và thu dọn tiến trình của chúng.
+fn finish_procsubs() {
+    let list = PROCSUBS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for (fd, pid) in list {
+        drop(fd);
+        wait_pid(pid);
+    }
+}
+
+/// `time pipeline`: in real / user / sys ra stderr.
+struct TimeReport {
+    start: std::time::Instant,
+    user: f64,
+    sys: f64,
+}
+
+fn child_times() -> (f64, f64) {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+    let t = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1e6;
+    (t(ru.ru_utime), t(ru.ru_stime))
+}
+
+impl TimeReport {
+    fn start() -> Self {
+        let (user, sys) = child_times();
+        TimeReport { start: std::time::Instant::now(), user, sys }
     }
 
-    #[test]
-    fn non_assignment_stops_peeling() {
-        // `ls A=1` — A=1 là argument, không phải phép gán
-        let (a, rest) = split_leading_assignments(vec!["ls".into(), "A=1".into()]);
-        assert!(a.is_empty());
-        assert_eq!(rest, vec!["ls", "A=1"]);
-    }
-
-    #[test]
-    fn invalid_names_are_not_assignments() {
-        assert!(parse_assignment("=foo").is_none());
-        assert!(parse_assignment("1AB=x").is_none());
-        assert!(parse_assignment("A-B=x").is_none());
-        assert_eq!(parse_assignment("_OK=1"), Some(("_OK".into(), "1".into())));
-        assert_eq!(parse_assignment("x+=b"), Some(("x+".into(), "b".into())));
-        assert!(parse_assignment("+=b").is_none());
+    fn finish(self) {
+        let real = self.start.elapsed().as_secs_f64();
+        let (user, sys) = child_times();
+        let fmt = |s: f64| format!("{}m{:.3}s", (s / 60.0) as u64, s % 60.0);
+        eprintln!("\nreal\t{}\nuser\t{}\nsys\t{}", fmt(real), fmt(user - self.user), fmt(sys - self.sys));
     }
 }

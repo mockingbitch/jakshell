@@ -4,7 +4,7 @@ So sánh hành vi của `jaksh` với `bash`. Mọi kịch bản chạy với `H
 
 | File | Nội dung |
 |---|---|
-| `cases.py` + `run.py` | ~160 đoạn lệnh chạy bằng `bash -c` và `jaksh -c`, so stdout + exit code |
+| `cases.py` + `run.py` | 215 đoạn lệnh (160 cơ bản + 55 script nâng cao) chạy bằng `bash -c` và `jaksh -c`, so stdout + exit code |
 | `signals.py` | Ctrl-C / Ctrl-Z / Ctrl-\ / `fg` / `bg` / `kill %N` / thoát khi còn job dừng, lái qua pty |
 | `nested.py` | jaksh chạy bên trong bash: trả terminal đúng khi thoát, `jaksh &` không tranh terminal |
 

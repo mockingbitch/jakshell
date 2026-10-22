@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::theme::Theme;
@@ -12,14 +13,33 @@ pub struct Shell {
     pub env: HashMap<String, String>,
     pub exported: HashSet<String>,
     pub readonly: HashSet<String>,
+    /// Biến khai báo `declare -i` — mọi phép gán được tính số học.
+    pub integers: HashSet<String>,
     /// `$0` và tham số vị trí `$1..` (`set --`, `shift`, đối số script).
     pub arg0: String,
     pub positional: Vec<String>,
     /// `$!` — pid lệnh nền gần nhất.
     pub last_bg_pid: Option<i32>,
-    /// Exit code từng lệnh của pipeline gần nhất (`${PIPESTATUS[i]}`).
-    pub pipestatus: Vec<i32>,
+    /// Mảng chỉ số (`a=(x y)`, `a[3]=z`) — thưa, theo thứ tự chỉ số.
+    pub arrays: HashMap<String, BTreeMap<i64, String>>,
+    /// Mảng kết hợp (`declare -A m; m[k]=v`).
+    pub assocs: HashMap<String, BTreeMap<String, String>>,
+    pub functions: HashMap<String, Rc<crate::parser::Command>>,
+    /// `break` / `continue` / `return` đang chờ xử lý.
+    pub flow: Flow,
+    pub loop_depth: u32,
+    /// Ngăn xếp `local`: mỗi lần gọi function 1 tầng, lưu giá trị cũ để trả lại.
+    pub local_frames: Vec<Vec<(String, SavedVar)>>,
+    /// `${FUNCNAME[@]}`.
+    pub funcnames: Vec<String>,
+    /// > 0 khi đang chạy điều kiện `if` / `while` / `&&`… — `set -e` không áp.
+    pub errexit_suppressed: u32,
+    /// Exit code của `$(...)` gần nhất (cho `x=$(false)` → `$?` = 1).
+    pub last_cmdsub_status: Option<i32>,
+    /// `$$` — pid shell chính (subshell vẫn thấy giá trị này, như bash).
+    pub shell_pid: u32,
     pub opts: ShellOpts,
+    pub shopts: Shopts,
     started: Instant,
     rng: Cell<u64>,
     pub aliases: HashMap<String, String>,
@@ -47,6 +67,82 @@ pub struct Shell {
     pub news: NewsConfig,
 }
 
+/// Điều khiển luồng chờ xử lý sau `break` / `continue` / `return`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Flow {
+    #[default]
+    Normal,
+    Break(u32),
+    Continue(u32),
+    Return,
+}
+
+/// Giá trị cũ của biến trước `local` — trả lại khi function kết thúc.
+#[derive(Clone, Debug)]
+pub enum SavedVar {
+    Unset,
+    Scalar(String, bool),
+    Indexed(BTreeMap<i64, String>),
+    Assoc(BTreeMap<String, String>),
+}
+
+/// Chỉ số mảng đã tính.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Index {
+    Num(i64),
+    Key(String),
+}
+
+/// Tuỳ chọn `shopt`.
+#[derive(Clone, Debug)]
+pub struct Shopts {
+    pub nullglob: bool,
+    pub dotglob: bool,
+    pub globstar: bool,
+    pub extglob: bool,
+    pub nocaseglob: bool,
+    pub nocasematch: bool,
+    pub failglob: bool,
+    pub expand_aliases: bool,
+    pub lastpipe: bool,
+}
+
+impl Default for Shopts {
+    fn default() -> Self {
+        Self {
+            nullglob: false,
+            dotglob: false,
+            globstar: false,
+            extglob: true,
+            nocaseglob: false,
+            nocasematch: false,
+            failglob: false,
+            expand_aliases: true,
+            lastpipe: false,
+        }
+    }
+}
+
+impl Shopts {
+    pub const NAMES: [&'static str; 9] =
+        ["nullglob", "dotglob", "globstar", "extglob", "nocaseglob", "nocasematch", "failglob", "expand_aliases", "lastpipe"];
+
+    pub fn slot(&mut self, name: &str) -> Option<&mut bool> {
+        Some(match name {
+            "nullglob" => &mut self.nullglob,
+            "dotglob" => &mut self.dotglob,
+            "globstar" => &mut self.globstar,
+            "extglob" => &mut self.extglob,
+            "nocaseglob" => &mut self.nocaseglob,
+            "nocasematch" => &mut self.nocasematch,
+            "failglob" => &mut self.failglob,
+            "expand_aliases" => &mut self.expand_aliases,
+            "lastpipe" => &mut self.lastpipe,
+            _ => return None,
+        })
+    }
+}
+
 /// Tuỳ chọn `set` của bash.
 #[derive(Clone, Debug, Default)]
 pub struct ShellOpts {
@@ -62,17 +158,20 @@ pub struct ShellOpts {
     pub allexport: bool,
     /// `-C` / `-o noclobber`: `>` không ghi đè file đã có.
     pub noclobber: bool,
+    /// `-f` / `-o noglob`: tắt glob.
+    pub noglob: bool,
 }
 
 impl ShellOpts {
     /// Cặp (tên -o, chữ cái) — dùng cho `set -o`, `set -x`, `$-`.
-    pub const NAMES: [(&'static str, char); 6] = [
+    pub const NAMES: [(&'static str, char); 7] = [
         ("errexit", 'e'),
         ("nounset", 'u'),
         ("xtrace", 'x'),
         ("pipefail", '\0'),
         ("allexport", 'a'),
         ("noclobber", 'C'),
+        ("noglob", 'f'),
     ];
 
     pub fn get(&self, name: &str) -> Option<bool> {
@@ -83,6 +182,7 @@ impl ShellOpts {
             "pipefail" => self.pipefail,
             "allexport" => self.allexport,
             "noclobber" => self.noclobber,
+            "noglob" => self.noglob,
             _ => return None,
         })
     }
@@ -95,6 +195,7 @@ impl ShellOpts {
             "pipefail" => &mut self.pipefail,
             "allexport" => &mut self.allexport,
             "noclobber" => &mut self.noclobber,
+            "noglob" => &mut self.noglob,
             _ => return false,
         };
         *slot = on;
@@ -279,9 +380,38 @@ impl Shell {
         // Bật màu mặc định cho `ls`: env var + (lát nữa) alias mặc định.
         setup_ls_colors();
 
-        let env: HashMap<String, String> = std::env::vars().collect();
+        let mut env: HashMap<String, String> = std::env::vars().collect();
         // Mọi biến kế thừa từ môi trường đều đã được export.
-        let exported: HashSet<String> = env.keys().cloned().collect();
+        let mut exported: HashSet<String> = env.keys().cloned().collect();
+        // Biến shell bash luôn có sẵn (script dựa vào chúng, nhất là khi `set -u`).
+        let uid = unsafe { libc::getuid() };
+        let euid = unsafe { libc::geteuid() };
+        let defaults = [
+            ("IFS", " \t\n".to_string()),
+            ("OPTIND", "1".to_string()),
+            ("OPTERR", "1".to_string()),
+            ("PPID", unsafe { libc::getppid() }.to_string()),
+            ("UID", uid.to_string()),
+            ("EUID", euid.to_string()),
+            ("OSTYPE", if cfg!(target_os = "macos") { "darwin".into() } else { "linux-gnu".into() }),
+            ("HOSTTYPE", std::env::consts::ARCH.to_string()),
+            ("JAKSH_VERSION", env!("JAKSH_VERSION").to_string()),
+        ];
+        for (k, v) in defaults {
+            env.entry(k.to_string()).or_insert(v);
+        }
+        if !env.contains_key("HOSTNAME") {
+            let mut buf = [0u8; 256];
+            if unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0 {
+                let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                env.insert("HOSTNAME".into(), String::from_utf8_lossy(&buf[..end]).into_owned());
+            }
+        }
+        // SHLVL tăng 1 mỗi tầng shell lồng nhau (export như bash).
+        let shlvl = env.get("SHLVL").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
+        env.insert("SHLVL".into(), shlvl.to_string());
+        exported.insert("SHLVL".into());
+        std::env::set_var("SHLVL", shlvl.to_string());
         let cwd = std::env::current_dir()?;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -297,11 +427,22 @@ impl Shell {
             env,
             exported,
             readonly: HashSet::new(),
+            integers: HashSet::new(),
             arg0: std::env::args().next().unwrap_or_else(|| "jaksh".into()),
             positional: Vec::new(),
             last_bg_pid: None,
-            pipestatus: Vec::new(),
+            arrays: HashMap::new(),
+            assocs: HashMap::new(),
+            functions: HashMap::new(),
+            flow: Flow::Normal,
+            loop_depth: 0,
+            local_frames: Vec::new(),
+            funcnames: Vec::new(),
+            errexit_suppressed: 0,
+            last_cmdsub_status: None,
+            shell_pid: std::process::id(),
             opts: ShellOpts::default(),
+            shopts: Shopts::default(),
             started: Instant::now(),
             rng: Cell::new(seed | 1),
             aliases: default_aliases(),
@@ -355,7 +496,8 @@ impl Shell {
             "0" => return Some(self.arg0.clone()),
             "#" => return Some(self.positional.len().to_string()),
             "@" | "*" => return Some(self.positional.join(" ")),
-            "$" => return Some(std::process::id().to_string()),
+            "$" => return Some(self.shell_pid.to_string()),
+            "BASHPID" => return Some(std::process::id().to_string()),
             "!" => return self.last_bg_pid.map(|p| p.to_string()),
             "-" => return Some(self.flags_string()),
             "RANDOM" => {
@@ -369,20 +511,148 @@ impl Shell {
             }
             "SECONDS" => return Some(self.started.elapsed().as_secs().to_string()),
             "LINENO" => return Some(self.env.get("LINENO").cloned().unwrap_or_else(|| "1".into())),
-            "PIPESTATUS" => return self.pipestatus.first().map(|c| c.to_string()),
+            "FUNCNAME" => return self.funcnames.last().cloned(),
             _ => {}
         }
         if let Ok(n) = name.parse::<usize>() {
             return self.positional.get(n.wrapping_sub(1)).cloned().filter(|_| n > 0);
         }
-        // `${PIPESTATUS[i]}` / `${PIPESTATUS[@]}` (chưa có mảng tổng quát).
-        if let Some(idx) = name.strip_prefix("PIPESTATUS[").and_then(|r| r.strip_suffix(']')) {
-            return match idx {
-                "@" | "*" => Some(self.pipestatus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ")),
-                _ => idx.parse::<usize>().ok().and_then(|i| self.pipestatus.get(i)).map(|c| c.to_string()),
-            };
+        if let Some(v) = self.env.get(name) {
+            return Some(v.clone());
         }
-        self.env.get(name).cloned()
+        // Tên mảng không kèm chỉ số = phần tử 0.
+        if let Some(a) = self.arrays.get(name) {
+            return a.get(&0).cloned();
+        }
+        self.assocs.get(name).and_then(|m| m.get("0").cloned())
+    }
+
+    /// Có phải mảng kết hợp không.
+    pub fn is_assoc(&self, name: &str) -> bool {
+        self.assocs.contains_key(name)
+    }
+
+    pub fn is_array(&self, name: &str) -> bool {
+        self.arrays.contains_key(name) || self.assocs.contains_key(name) || name == "FUNCNAME"
+    }
+
+    /// `${a[i]}`.
+    pub fn get_index(&self, name: &str, idx: &Index) -> Option<String> {
+        match idx {
+            Index::Key(k) => self.assocs.get(name).and_then(|m| m.get(k).cloned()),
+            Index::Num(i) => {
+                if name == "FUNCNAME" {
+                    let n = self.funcnames.len() as i64;
+                    let pos = if *i < 0 { n + i } else { *i };
+                    return usize::try_from(n - 1 - pos).ok().and_then(|p| self.funcnames.get(p)).cloned();
+                }
+                if let Some(a) = self.arrays.get(name) {
+                    let i = if *i < 0 { a.keys().next_back().map_or(0, |m| m + 1) + i } else { *i };
+                    return a.get(&i).cloned();
+                }
+                if let Some(m) = self.assocs.get(name) {
+                    return m.get(&i.to_string()).cloned();
+                }
+                // Biến thường như mảng 1 phần tử.
+                (*i == 0).then(|| self.env.get(name).cloned()).flatten()
+            }
+        }
+    }
+
+    /// `${a[@]}` — giá trị theo thứ tự chỉ số; biến thường → 1 phần tử.
+    pub fn array_values(&self, name: &str) -> Vec<String> {
+        if name == "FUNCNAME" {
+            return self.funcnames.iter().rev().cloned().collect();
+        }
+        if let Some(a) = self.arrays.get(name) {
+            return a.values().cloned().collect();
+        }
+        if let Some(m) = self.assocs.get(name) {
+            return m.values().cloned().collect();
+        }
+        self.get_var(name).into_iter().collect()
+    }
+
+    /// `${!a[@]}` — các chỉ số / khoá.
+    pub fn array_keys(&self, name: &str) -> Vec<String> {
+        if let Some(a) = self.arrays.get(name) {
+            return a.keys().map(|k| k.to_string()).collect();
+        }
+        if let Some(m) = self.assocs.get(name) {
+            return m.keys().cloned().collect();
+        }
+        if self.get_var(name).is_some() {
+            return vec!["0".into()];
+        }
+        Vec::new()
+    }
+
+    /// `a[i]=v`. Biến thường được chuyển thành mảng (giá trị cũ ở chỉ số 0).
+    pub fn set_index(&mut self, name: &str, idx: Index, value: &str) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+        }
+        if let Some(m) = self.assocs.get_mut(name) {
+            let key = match idx {
+                Index::Key(k) => k,
+                Index::Num(n) => n.to_string(),
+            };
+            m.insert(key, value.to_string());
+            return Ok(());
+        }
+        let Index::Num(mut i) = idx else {
+            return Err(anyhow!("{}: không phải mảng kết hợp (dùng `declare -A {}`)", name, name));
+        };
+        if !self.arrays.contains_key(name) {
+            let mut a = BTreeMap::new();
+            if let Some(old) = self.env.remove(name) {
+                a.insert(0, old);
+            }
+            if self.exported.remove(name) {
+                std::env::remove_var(name);
+            }
+            self.arrays.insert(name.to_string(), a);
+        }
+        let a = self.arrays.get_mut(name).expect("vừa tạo");
+        if i < 0 {
+            i += a.keys().next_back().map_or(0, |m| m + 1);
+            if i < 0 {
+                return Err(anyhow!("{}: chỉ số mảng âm không hợp lệ", name));
+            }
+        }
+        a.insert(i, value.to_string());
+        Ok(())
+    }
+
+    /// `a=(x y z)` — thay toàn bộ mảng chỉ số.
+    pub fn set_array(&mut self, name: &str, values: BTreeMap<i64, String>) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+        }
+        self.env.remove(name);
+        if self.exported.remove(name) {
+            std::env::remove_var(name);
+        }
+        self.assocs.remove(name);
+        self.arrays.insert(name.to_string(), values);
+        Ok(())
+    }
+
+    /// `declare -A m=([k]=v …)` / `m=([k]=v)` khi m đã là mảng kết hợp.
+    pub fn set_assoc(&mut self, name: &str, values: BTreeMap<String, String>) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+        }
+        self.env.remove(name);
+        self.arrays.remove(name);
+        self.assocs.insert(name.to_string(), values);
+        Ok(())
+    }
+
+    /// `PIPESTATUS` sau mỗi pipeline.
+    pub fn set_pipestatus(&mut self, codes: &[i32]) {
+        let a = codes.iter().enumerate().map(|(i, c)| (i as i64, c.to_string())).collect();
+        self.arrays.insert("PIPESTATUS".into(), a);
     }
 
     /// `$-` — chữ cái của các tuỳ chọn đang bật (+ `i` khi tương tác).
@@ -399,10 +669,17 @@ impl Shell {
     }
 
     /// Gán biến. Biến đã export (hoặc đang `set -a`) được đồng bộ sang env của
-    /// tiến trình để lệnh con thấy; biến thường thì chỉ shell thấy.
+    /// tiến trình để lệnh con thấy; biến thường thì chỉ shell thấy. Gán vào tên
+    /// mảng = gán phần tử 0 (như bash).
     pub fn set_var(&mut self, name: &str, value: &str) -> Result<()> {
         if self.readonly.contains(name) {
             return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+        }
+        if self.arrays.contains_key(name) {
+            return self.set_index(name, Index::Num(0), value);
+        }
+        if self.assocs.contains_key(name) {
+            return self.set_index(name, Index::Key("0".into()), value);
         }
         self.env.insert(name.into(), value.into());
         if self.opts.allexport {
@@ -439,10 +716,91 @@ impl Shell {
         if self.readonly.contains(name) {
             return Err(anyhow!("{}: không unset được biến chỉ đọc", name));
         }
+        self.integers.remove(name);
         self.env.remove(name);
+        self.arrays.remove(name);
+        self.assocs.remove(name);
         self.exported.remove(name);
         std::env::remove_var(name);
         Ok(())
+    }
+
+    /// `unset 'a[i]'`.
+    pub fn unset_index(&mut self, name: &str, idx: &Index) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: không unset được biến chỉ đọc", name));
+        }
+        match idx {
+            Index::Num(i) => {
+                if let Some(a) = self.arrays.get_mut(name) {
+                    a.remove(i);
+                } else if let Some(m) = self.assocs.get_mut(name) {
+                    m.remove(&i.to_string());
+                } else if *i == 0 {
+                    self.env.remove(name);
+                }
+            }
+            Index::Key(k) => {
+                if let Some(m) = self.assocs.get_mut(name) {
+                    m.remove(k);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `local NAME` trong function: lưu trạng thái cũ (1 lần mỗi tầng) để trả lại
+    /// khi function kết thúc. Ngoài function → lỗi như bash.
+    pub fn make_local(&mut self, name: &str) -> Result<()> {
+        let saved = if let Some(a) = self.arrays.get(name) {
+            SavedVar::Indexed(a.clone())
+        } else if let Some(m) = self.assocs.get(name) {
+            SavedVar::Assoc(m.clone())
+        } else if let Some(v) = self.env.get(name) {
+            SavedVar::Scalar(v.clone(), self.exported.contains(name))
+        } else {
+            SavedVar::Unset
+        };
+        let Some(frame) = self.local_frames.last_mut() else {
+            return Err(anyhow!("local: chỉ dùng được bên trong function"));
+        };
+        if frame.iter().any(|(n, _)| n == name) {
+            return Ok(());
+        }
+        frame.push((name.to_string(), saved));
+        Ok(())
+    }
+
+    /// Trả lại các biến `local` của tầng function vừa kết thúc.
+    pub fn pop_locals(&mut self) {
+        let Some(frame) = self.local_frames.pop() else { return };
+        for (name, saved) in frame.into_iter().rev() {
+            self.env.remove(&name);
+            self.arrays.remove(&name);
+            self.assocs.remove(&name);
+            match saved {
+                SavedVar::Unset => {
+                    if self.exported.remove(&name) {
+                        std::env::remove_var(&name);
+                    }
+                }
+                SavedVar::Scalar(v, exported) => {
+                    if exported {
+                        self.exported.insert(name.clone());
+                        std::env::set_var(&name, &v);
+                    } else if self.exported.remove(&name) {
+                        std::env::remove_var(&name);
+                    }
+                    self.env.insert(name, v);
+                }
+                SavedVar::Indexed(a) => {
+                    self.arrays.insert(name, a);
+                }
+                SavedVar::Assoc(m) => {
+                    self.assocs.insert(name, m);
+                }
+            }
+        }
     }
 
     pub fn add_job(&mut self, pgid: i32, pids: Vec<i32>, cmd: String) -> u32 {
@@ -561,4 +919,21 @@ fn default_aliases() -> HashMap<String, String> {
 fn default_prompt_template() -> String {
     // {accent}{user}@{host} {path}{git} {status}{reset}
     "{accent}{cwd_short}{reset}{git} {arrow} ".to_string()
+}
+
+/// Biểu thức số học đọc / ghi biến của shell (kể cả phần tử mảng).
+impl crate::arith::Vars for Shell {
+    fn get(&self, name: &str, index: Option<i64>) -> Option<String> {
+        match index {
+            Some(i) => self.get_index(name, &Index::Num(i)),
+            None => self.get_var(name),
+        }
+    }
+
+    fn set(&mut self, name: &str, index: Option<i64>, value: i64) -> Result<()> {
+        match index {
+            Some(i) => self.set_index(name, Index::Num(i), &value.to_string()),
+            None => self.set_var(name, &value.to_string()),
+        }
+    }
 }

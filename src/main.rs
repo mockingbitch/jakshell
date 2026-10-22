@@ -1,6 +1,8 @@
+mod arith;
 mod bookmark;
 mod builtins;
 mod completion;
+mod cond;
 mod config;
 mod executor;
 mod expand;

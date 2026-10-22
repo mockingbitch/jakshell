@@ -8,12 +8,23 @@ use anyhow::{anyhow, Result};
 /// Tách 1 lần nhập (có thể là khối paste nhiều dòng) thành các entry lịch sử.
 /// Dòng kết thúc bằng `\` được nối với dòng sau (bỏ `\`, ghép bằng 1 dấu cách)
 /// — nhờ đó `curl ... \` paste nhiều dòng gọi lại bằng ↑ thành 1 lệnh chạy được
-/// thay vì từng mẩu `--header ...` rời rạc.
+/// thay vì từng mẩu `--header ...` rời rạc. Lệnh ghép nhiều dòng (`for … done`,
+/// `if … fi`, chuỗi / here-doc nhiều dòng) được giữ nguyên thành 1 entry.
 pub fn entries(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    // Khối nhiều dòng chưa trọn cú pháp (giữ xuống dòng thật).
+    let mut block = String::new();
     for raw in input.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if !block.is_empty() {
+            block.push('\n');
+            block.push_str(line);
+            if !crate::parser::needs_more(&block) {
+                out.push(std::mem::take(&mut block).trim().to_string());
+            }
+            continue;
+        }
         let piece = if cur.is_empty() { line } else { line.trim_start() };
         match piece.strip_suffix('\\') {
             Some(head) => {
@@ -23,16 +34,23 @@ pub fn entries(input: &str) -> Vec<String> {
             None => {
                 cur.push_str(piece);
                 let entry = cur.trim().to_string();
-                if !entry.is_empty() {
+                cur.clear();
+                if entry.is_empty() {
+                    continue;
+                }
+                if crate::parser::needs_more(&entry) {
+                    block = entry;
+                } else {
                     out.push(entry);
                 }
-                cur.clear();
             }
         }
     }
-    let entry = cur.trim().to_string();
-    if !entry.is_empty() {
-        out.push(entry);
+    for rest in [cur, block] {
+        let entry = rest.trim().to_string();
+        if !entry.is_empty() {
+            out.push(entry);
+        }
     }
     out
 }
@@ -297,6 +315,8 @@ mod tests {
             vec!["curl --location 'https://x/v' --header 'A: b' --data '{}'", "ls"]
         );
         assert_eq!(entries("a\n\nb"), vec!["a", "b"]);
+        // lệnh ghép nhiều dòng = 1 entry
+        assert_eq!(entries("for x in 1 2\ndo\n  echo $x\ndone\nls"), vec!["for x in 1 2\ndo\n  echo $x\ndone", "ls"]);
     }
 
     #[test]

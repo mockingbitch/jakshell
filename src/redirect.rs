@@ -15,7 +15,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::rc::Rc;
 
-use crate::expand::expand_word;
+use crate::expand::{expand_string, expand_words};
 use crate::parser::{Redirect, RedirectKind};
 use crate::shell::Shell;
 
@@ -91,13 +91,13 @@ pub fn plan(shell: &Rc<RefCell<Shell>>, redirects: &[Redirect]) -> Result<Plan> 
     for r in redirects {
         match r.kind {
             RedirectKind::HereDoc => {
-                let body = expand_word(&shell.borrow(), &r.target, false).concat();
+                let body = expand_string(shell, &r.target)?;
                 plan.push(r.fd, FdAction::Open(lift(temp_input(&body)?)?));
                 opened.push(r.fd);
                 continue;
             }
             RedirectKind::HereString => {
-                let mut text = expand_word(&shell.borrow(), &r.target, false).join(" ");
+                let mut text = expand_string(shell, &r.target)?;
                 text.push('\n');
                 plan.push(r.fd, FdAction::Open(lift(temp_input(&text)?)?));
                 opened.push(r.fd);
@@ -106,7 +106,7 @@ pub fn plan(shell: &Rc<RefCell<Shell>>, redirects: &[Redirect]) -> Result<Plan> 
             _ => {}
         }
 
-        let pieces = expand_word(&shell.borrow(), &r.target, true);
+        let pieces = expand_words(shell, std::slice::from_ref(&r.target))?;
         if pieces.len() != 1 {
             return Err(anyhow!("redirect mơ hồ (đích bung ra {} từ)", pieces.len()));
         }
