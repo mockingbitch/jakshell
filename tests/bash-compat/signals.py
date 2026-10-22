@@ -113,6 +113,10 @@ check("6 Ctrl-\\ sleep: shell sống", sh.ok(6))
 sh.send(b"\x03", 0.3); sh.send(b"echo half-typed\x03", 0.5)
 check("7 ^C ở prompt: shell sống", sh.ok(7))
 
+# 7b. Lệnh không tồn tại: shell phải lấy lại terminal (trước đây REPL chết vì EIO)
+sh.run("nosuchcmd_xyz_123", 0.8)
+check("7b lệnh không tồn tại: shell vẫn đọc được", sh.ok(71))
+
 # 8. Chương trình bỏ qua SIGINT → ^C không làm gì, nó chạy hết
 t0 = time.time()
 out = sh.run("sh -c 'trap \"\" INT; sleep 1.5; echo survived-trap'", 0.4) + sh.send(b"\x03", 2.0)

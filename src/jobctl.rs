@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::shell::{JobState, Shell};
 
@@ -45,8 +45,67 @@ thread_local! {
     static EXIT_WARNED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Tín hiệu đã tới nhưng trap chưa chạy (bit thứ N = tín hiệu N).
+static PENDING: AtomicU64 = AtomicU64::new(0);
+
 extern "C" fn on_sigint(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
+    PENDING.fetch_or(1 << libc::SIGINT, Ordering::SeqCst);
+}
+
+extern "C" fn on_trapped(sig: libc::c_int) {
+    if (0..64).contains(&sig) {
+        PENDING.fetch_or(1 << sig, Ordering::SeqCst);
+    }
+}
+
+/// Cách xử lý 1 tín hiệu theo `trap`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// `trap 'lệnh' SIG` — ghi nhận, chạy trap sau lệnh hiện tại.
+    Trap,
+    /// `trap '' SIG` — bỏ qua (tiến trình con cũng bỏ qua, như bash).
+    Ignore,
+    /// `trap - SIG` — như lúc khởi động.
+    Default,
+}
+
+pub fn set_signal_disposition(sig: i32, d: Disposition) {
+    unsafe {
+        match d {
+            Disposition::Ignore => {
+                libc::signal(sig, libc::SIG_IGN);
+            }
+            Disposition::Trap => {
+                // REPL: SIGINT đã có handler riêng (cũng ghi nhận trap).
+                if sig == libc::SIGINT && interactive() {
+                    set_handler(libc::SIGINT, on_sigint);
+                } else {
+                    set_handler(sig, on_trapped);
+                }
+            }
+            Disposition::Default => {
+                // Ở REPL, "mặc định" của INT/QUIT/TSTP… là chế độ bảo vệ shell.
+                if interactive() && JOB_SIGNALS.contains(&sig) {
+                    match sig {
+                        libc::SIGINT => set_handler(libc::SIGINT, on_sigint),
+                        libc::SIGQUIT => set_handler(libc::SIGQUIT, on_sigquit),
+                        _ => {
+                            libc::signal(sig, libc::SIG_IGN);
+                        }
+                    }
+                } else {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
+            }
+        }
+    }
+}
+
+/// Lấy và xoá danh sách tín hiệu đang chờ chạy trap.
+pub fn take_pending_signals() -> Vec<i32> {
+    let bits = PENDING.swap(0, Ordering::SeqCst);
+    (1..64).filter(|n| bits & (1 << n) != 0).collect()
 }
 
 extern "C" fn on_sigquit(_: libc::c_int) {}
@@ -194,6 +253,16 @@ pub fn after_spawn(pid: i32, pgid: i32, foreground: bool) -> i32 {
     pgid
 }
 
+/// Lấy lại terminal cho shell. Cần khi spawn thất bại (lệnh không tồn tại):
+/// tiến trình con đã kịp chạy `pre_exec` (chiếm terminal) trước khi `exec` lỗi.
+pub fn reclaim_terminal() {
+    if active() {
+        with_state(|s| unsafe {
+            libc::tcsetpgrp(s.tty, s.shell_pgid);
+        });
+    }
+}
+
 /// `exec` thay thế shell: chương trình mới phải nhận tín hiệu mặc định.
 pub fn reset_for_exec(cmd: &mut Command) {
     unsafe {
@@ -260,6 +329,8 @@ pub fn wait_foreground(shell: &Rc<RefCell<Shell>>, pgid: i32, pids: &[i32], cmd:
 
     if sigint {
         INTERRUPTED.store(true, Ordering::SeqCst);
+        // Job bị Ctrl-C = shell coi như nhận SIGINT → trap INT (nếu có) chạy, như bash.
+        PENDING.fetch_or(1 << libc::SIGINT, Ordering::SeqCst);
         // Terminal đã echo "^C" — xuống dòng để output sau không dính vào.
         println!();
     }

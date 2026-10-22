@@ -6,6 +6,9 @@ use crate::parser::Redirect;
 use crate::shell::Shell;
 
 mod script;
+mod sys;
+
+pub use sys::trap_name;
 
 pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
@@ -14,6 +17,7 @@ pub const BUILTINS: &[&str] = &[
     "eval", "wait", "disown", "readonly", "declare", "typeset", "shift",
     "read", "command", "type", "hash", "builtin", ":", "break", "continue", "return",
     "local", "let", "test", "[", "shopt", "getopts", "mapfile", "readarray", "printf",
+    "trap", "pushd", "popd", "dirs", "umask", "ulimit", "times", "fc",
 ];
 
 /// Từ khoá của shell (cho `type`).
@@ -37,7 +41,15 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
     }
     flush_std();
     let result = match cmd {
-        "cd" => cd(shell, &args),
+        "cd" => sys::cd(shell, &args),
+        "pushd" => sys::pushd(shell, &args),
+        "popd" => sys::popd(shell, &args),
+        "dirs" => sys::dirs(shell, &args),
+        "umask" => sys::umask(shell, &args),
+        "ulimit" => sys::ulimit(shell, &args),
+        "times" => sys::times(),
+        "trap" => sys::trap(shell, &args),
+        "fc" => fc(shell, &args),
         "pwd" => pwd(shell),
         "exit" => exit(shell, &args),
         "export" => export(shell, &args),
@@ -92,33 +104,6 @@ fn flush_std() {
     let _ = std::io::stderr().flush();
 }
 
-fn cd(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    let target = if args.is_empty() {
-        dirs::home_dir().ok_or_else(|| anyhow!("không tìm được HOME"))?
-    } else if args[0] == "-" {
-        let prev = shell.borrow().env.get("OLDPWD").cloned();
-        match prev {
-            Some(p) => std::path::PathBuf::from(p),
-            None => return Err(anyhow!("OLDPWD chưa được đặt")),
-        }
-    } else {
-        let expanded = shellexpand::tilde(args[0]).to_string();
-        std::path::PathBuf::from(expanded)
-    };
-    let abs = if target.is_absolute() {
-        target.clone()
-    } else {
-        shell.borrow().cwd.join(&target)
-    };
-    let canon = std::fs::canonicalize(&abs).map_err(|e| anyhow!("cd {}: {}", abs.display(), e))?;
-    let old = shell.borrow().cwd.clone();
-    shell.borrow_mut().export_var("OLDPWD", Some(&old.display().to_string()))?;
-    std::env::set_current_dir(&canon)?;
-    shell.borrow_mut().cwd = canon.clone();
-    shell.borrow_mut().export_var("PWD", Some(&canon.display().to_string()))?;
-    Ok(0)
-}
-
 fn pwd(shell: &Rc<RefCell<Shell>>) -> Result<i32> {
     println!("{}", shell.borrow().cwd.display());
     Ok(0)
@@ -132,6 +117,8 @@ fn exit(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     if !crate::jobctl::confirm_exit(shell) {
         return Ok(1);
     }
+    shell.borrow_mut().set_last_status(code);
+    crate::executor::run_exit_trap(shell);
     // Lời chào chỉ cho phiên tương tác — `-c` / script không được in rác ra stdout.
     if crate::jobctl::interactive() {
         println!("{} 👋", crate::i18n::t("common.goodbye"));
@@ -525,6 +512,12 @@ fn set(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
 /// `set -o tên` / `set +o tên`. Tuỳ chọn bash chưa có tác dụng ở jaksh (vi,
 /// emacs, history…) được nhận im lặng để `.bashrc` / script không hỏng.
 fn set_named_option(shell: &Rc<RefCell<Shell>>, name: &str, on: bool) -> Result<()> {
+    if matches!(name, "vi" | "emacs") {
+        // REPL đổi chế độ soạn dòng sau lệnh này.
+        let mode = if (name == "vi") == on { "vi" } else { "emacs" };
+        shell.borrow_mut().edit_mode_request = Some(mode.to_string());
+        return Ok(());
+    }
     const HARMLESS: [&str; 20] = [
         "vi", "emacs", "history", "posix", "monitor", "braceexpand", "hashall", "histexpand",
         "interactive-comments", "ignoreeof", "notify", "functrace", "errtrace", "nolog", "onecmd", "physical",
@@ -534,6 +527,21 @@ fn set_named_option(shell: &Rc<RefCell<Shell>>, name: &str, on: bool) -> Result<
         return Ok(());
     }
     Err(anyhow!("set: {}: tên tuỳ chọn không hợp lệ", name))
+}
+
+/// Danh sách tín hiệu (`kill -l`, `trap -l`).
+pub fn kill_list() -> Result<i32> {
+    use nix::sys::signal::Signal;
+    let all: Vec<String> = Signal::iterator().map(|s| format!("{:>2}) {}", s as i32, s.as_str())).collect();
+    for chunk in all.chunks(5) {
+        println!("{}", chunk.join("\t"));
+    }
+    Ok(0)
+}
+
+/// Luôn bọc nháy đơn (`trap -p`, `declare -p` kiểu bash).
+pub fn sq_always(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "'\\''"))
 }
 
 /// Bọc nháy đơn nếu cần (an toàn để dán lại vào shell) — dùng cho `set`, `set -x`.
@@ -997,6 +1005,128 @@ fn source(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     code
 }
 
+/// Mở `text` trong `$FCEDIT` / `$VISUAL` / `$EDITOR` (mặc định `vi`), trả về
+/// nội dung sau khi sửa (`None` nếu editor thoát lỗi). Dùng cho `fc` và Ctrl-X Ctrl-E.
+pub fn edit_in_editor(shell: &Rc<RefCell<Shell>>, text: &str) -> Result<Option<String>> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let editor = {
+        let sh = shell.borrow();
+        ["FCEDIT", "VISUAL", "EDITOR"].iter().find_map(|v| sh.get_var(v).filter(|e| !e.is_empty())).unwrap_or_else(|| "vi".into())
+    };
+    let path = std::env::temp_dir().join(format!("jaksh-edit-{}.sh", std::process::id()));
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
+        writeln!(f, "{}", text)?;
+    }
+    // Editor có thể kèm tham số (`code --wait`, `nvim -u NONE`).
+    let mut parts = editor.split_whitespace();
+    let prog = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(prog).args(parts).arg(&path).current_dir(&shell.borrow().cwd).status();
+    let result = match status {
+        Ok(st) if st.success() => Some(std::fs::read_to_string(&path)?.trim_end().to_string()),
+        Ok(_) => None,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(anyhow!("không mở được editor `{}`: {}", editor, e));
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    Ok(result)
+}
+
+/// Chạy chuỗi lệnh như gõ ở prompt (in ra trước, thêm vào lịch sử).
+fn run_from_history(shell: &Rc<RefCell<Shell>>, src: &str) -> Result<i32> {
+    if src.trim().is_empty() {
+        return Ok(0);
+    }
+    eprintln!("{}", src);
+    shell.borrow_mut().history_add_request.push(src.to_string());
+    let tokens = crate::lexer::tokenize(src)?;
+    let ast = crate::parser::parse(&tokens)?;
+    crate::executor::execute(shell, &ast)
+}
+
+/// `fc -l [đầu [cuối]]` liệt kê · `fc -s [cũ=mới] [lệnh]` chạy lại · `fc [lệnh]`
+/// sửa trong editor rồi chạy.
+fn fc(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    // Lệnh `fc` vừa gõ là entry cuối — bỏ ra như bash.
+    let hist: Vec<String> = {
+        let h = &shell.borrow().history;
+        h[..h.len().saturating_sub(1)].to_vec()
+    };
+    // `N` (1-based), `-N` (tính từ cuối), hoặc tiền tố lệnh → vị trí 0-based.
+    let find = |spec: Option<&str>| -> Option<usize> {
+        let idx = match spec {
+            None => hist.len() as i64 - 1,
+            Some(s) => match s.parse::<i64>() {
+                Ok(n) if n < 0 => hist.len() as i64 + n,
+                Ok(n) => n - 1,
+                Err(_) => return hist.iter().rposition(|e| e.starts_with(s)),
+            },
+        };
+        usize::try_from(idx).ok().filter(|&i| i < hist.len())
+    };
+    let (mut list, mut no_num, mut reverse, mut reexec) = (false, false, false, false);
+    let mut rest = Vec::new();
+    for a in args {
+        match *a {
+            "-l" => list = true,
+            "-n" => no_num = true,
+            "-r" => reverse = true,
+            "-s" => reexec = true,
+            "-ln" | "-nl" => {
+                list = true;
+                no_num = true;
+            }
+            "-e" => {}
+            _ => rest.push(*a),
+        }
+    }
+    if list {
+        if hist.is_empty() {
+            return Ok(0);
+        }
+        let last = find(rest.get(1).copied()).unwrap_or(hist.len().saturating_sub(1));
+        let first = match rest.first() {
+            Some(s) => find(Some(s)).ok_or_else(|| anyhow!("fc: {}: không có trong lịch sử", s))?,
+            None => hist.len().saturating_sub(16),
+        };
+        let (lo, hi) = if first <= last { (first, last) } else { (last, first) };
+        let mut idx: Vec<usize> = (lo..=hi.min(hist.len().saturating_sub(1))).collect();
+        if reverse || first > last {
+            idx.reverse();
+        }
+        for i in idx {
+            if no_num {
+                println!("\t {}", hist[i]);
+            } else {
+                println!("{:<5}\t {}", i + 1, hist[i]);
+            }
+        }
+        return Ok(0);
+    }
+    if reexec {
+        let (subst, spec): (Option<(&str, &str)>, Option<&str>) = match rest.as_slice() {
+            [] => (None, None),
+            [a] if a.contains('=') => (a.split_once('='), None),
+            [a] => (None, Some(*a)),
+            [a, b, ..] => (a.split_once('='), Some(*b)),
+        };
+        let i = find(spec).ok_or_else(|| anyhow!("fc: không tìm thấy lệnh trong lịch sử"))?;
+        let mut cmd = hist[i].clone();
+        if let Some((old, new)) = subst {
+            cmd = cmd.replacen(old, new, 1);
+        }
+        return run_from_history(shell, &cmd);
+    }
+    let i = find(rest.first().copied()).ok_or_else(|| anyhow!("fc: lịch sử trống"))?;
+    match edit_in_editor(shell, &hist[i])? {
+        Some(edited) => run_from_history(shell, &edited),
+        None => Ok(1),
+    }
+}
+
 fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     // Đọc từ lịch sử trong bộ nhớ của phiên (cập nhật theo thời gian thực),
     // KHÔNG đọc file: file chỉ phản ánh lần thoát trước nên sẽ cũ, và còn ở
@@ -1013,8 +1143,19 @@ fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             shell.borrow_mut().history_scrub_requested = true;
             return Ok(0);
         }
+        ["-d", n] => {
+            let n: i64 = n.parse().map_err(|_| anyhow!("history -d: {}: cần số", n))?;
+            let len = shell.borrow().history.len() as i64;
+            // Âm = đếm từ cuối (như bash 5).
+            let idx = if n < 0 { len + n } else { n - 1 };
+            if idx < 0 || idx >= len {
+                return Err(anyhow!("history -d: {}: ngoài phạm vi lịch sử", n));
+            }
+            shell.borrow_mut().history_delete_request = Some(idx as usize);
+            return Ok(0);
+        }
         [n] if n.parse::<usize>().is_ok() => {}
-        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c | history --scrub")),
+        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c | history -d N | history --scrub")),
     }
     let sh = shell.borrow();
     let total = sh.history.len();
@@ -1157,10 +1298,7 @@ fn kill(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             let sig = Signal::try_from(n).map_err(|_| anyhow!("kill: {}: số tín hiệu không hợp lệ", n))?;
             println!("{}", sig.as_str().trim_start_matches("SIG"));
         } else {
-            let all: Vec<String> = Signal::iterator().map(|s| format!("{:>2}) {}", s as i32, s.as_str())).collect();
-            for chunk in all.chunks(5) {
-                println!("{}", chunk.join("\t"));
-            }
+            kill_list()?;
         }
         return Ok(0);
     }

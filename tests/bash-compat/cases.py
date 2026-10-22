@@ -232,3 +232,27 @@ CASES += [
     ("escape-glob", "wave2", 'echo \\*.txt "*".txt'),
     ("dollar-single-quote", "wave2", "echo $'tab\\there' $'\\x41\\x42'"),
 ]
+
+# ── Đợt 3/4: trap, ngăn xếp thư mục, umask/ulimit, fc ──
+CASES += [
+    ("trap-exit-code", "wave3", 'trap "echo bye \\$?" EXIT; false; exit 3'),
+    ("trap-exit-in-func", "wave3", 'f() { trap "echo cleanup" EXIT; echo in-f; }; f; echo after'),
+    ("trap-err", "wave3", 'trap "echo ERR-caught" ERR; false; true; ls /nonexistent 2>/dev/null; echo end'),
+    ("trap-err-not-in-cond", "wave3", 'trap "echo ERR" ERR; if false; then :; fi; false || true; echo end'),
+    ("trap-err-set-e", "wave3", 'set -e; trap "echo on-err" ERR; trap "echo on-exit" EXIT; false; echo no'),
+    ("trap-signal-self", "wave3", 'trap "echo got-usr1" USR1; kill -USR1 $$; echo after'),
+    ("trap-term-continue", "wave3", 'trap "echo term" TERM; kill -TERM $$; echo still'),
+    ("trap-ignore", "wave3", 'trap "" USR2; kill -USR2 $$; echo survived'),
+    ("trap-reset", "wave3", 'trap "echo x" EXIT; trap - EXIT; echo done'),
+    ("trap-print", "wave3", 'trap "echo hi" INT; trap -p INT'),
+    ("trap-subshell-reset", "wave3", 'trap "echo parent-exit" EXIT; (echo in-sub); echo out'),
+    ("trap-exit-subshell-own", "wave3", '(trap "echo sub-exit" EXIT; echo body); echo after'),
+    ("trap-status-preserved", "wave3", 'trap "true" USR1; false; kill -USR1 $$; echo $?'),
+    ("pushd-popd-stack", "wave3", 'cd /; pushd /tmp >/dev/null; pushd /usr >/dev/null; dirs; popd >/dev/null; pwd; popd >/dev/null; pwd; dirs -v'),
+    ("pushd-swap", "wave3", 'cd /; pushd /tmp >/dev/null; pushd >/dev/null; pwd; dirs -p'),
+    ("cd-logical", "wave3", 'mkdir -p real/sub; ln -s real link; cd link/sub; pwd | sed "s|.*/case-[^/]*||"; cd ..; pwd | sed "s|.*/case-[^/]*||"; cd -P .; pwd | sed "s|.*/||"'),
+    ("cd-dash-print", "wave3", 'cd /; cd /tmp; cd - ; pwd'),
+    ("umask-symbolic", "wave3", 'umask 027; umask; umask -S; umask u=rwx,g=rx,o=; umask'),
+    ("ulimit-ops", "wave3", 'ulimit -n 512; ulimit -n; ulimit -Sn; (ulimit -t 100; ulimit -t)'),
+    ("fc-list", "wave3", 'fc -l 2>/dev/null; echo rc=$?'),
+]

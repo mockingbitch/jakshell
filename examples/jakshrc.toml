@@ -24,6 +24,8 @@ separator = "none"
 # + format JSON. Tự tắt khi pipe/redirect hoặc dùng -o/-O/-N/-v/-w.
 # false = curl chạy nguyên bản như bash.
 pretty_curl = true
+# Chế độ soạn dòng: "emacs" (mặc định) hoặc "vi". Đổi tạm: `set -o vi`.
+edit_mode = "emacs"
 
 [history]
 # Số lệnh tối đa giữ trong lịch sử (như HISTSIZE của bash).

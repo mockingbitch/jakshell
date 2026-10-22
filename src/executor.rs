@@ -68,6 +68,17 @@ pub fn execute(shell: &Rc<RefCell<Shell>>, prog: &Program) -> Result<i32> {
         };
         last_code = if pipeline.negate { (code == 0) as i32 } else { code };
         shell.borrow_mut().set_last_status(last_code);
+        // trap ERR: cùng điều kiện với `set -e` (không trong điều kiện / `&&`…).
+        if last_code != 0 && !suppress {
+            let run_err = {
+                let sh = shell.borrow();
+                sh.errexit_suppressed == 0 && !sh.in_trap && sh.traps.get("ERR").is_some_and(|a| !a.is_empty())
+            };
+            if run_err {
+                run_trap(shell, "ERR");
+            }
+        }
+        run_pending_traps(shell);
         // Ctrl-C giữa chừng → bỏ phần còn lại (kể cả vòng lặp bao ngoài):
         // `sleep 9; rm x` mà ^C thì KHÔNG chạy `rm x`, như bash.
         if crate::jobctl::interrupted() {
@@ -98,8 +109,52 @@ fn report_error(e: &anyhow::Error) {
     }
 }
 
+/// Chạy lệnh của trap `name`. `$?` được giữ nguyên sau khi trap chạy xong.
+pub fn run_trap(shell: &Rc<RefCell<Shell>>, name: &str) {
+    let Some(action) = shell.borrow().traps.get(name).cloned().filter(|a| !a.is_empty()) else {
+        return;
+    };
+    let (saved_status, was_in_trap) = {
+        let mut sh = shell.borrow_mut();
+        (sh.last_status(), std::mem::replace(&mut sh.in_trap, true))
+    };
+    match crate::lexer::tokenize(&action).and_then(|t| crate::parser::parse(&t)) {
+        Ok(prog) => {
+            let _ = execute(shell, &prog);
+        }
+        Err(e) => eprintln!("jaksh: trap {}: {}", name, e),
+    }
+    let mut sh = shell.borrow_mut();
+    sh.in_trap = was_in_trap;
+    sh.set_last_status(saved_status);
+}
+
+/// Chạy trap cho các tín hiệu đã tới (sau khi lệnh foreground xong, như bash).
+/// Có trap INT → Ctrl-C không huỷ phần còn lại của script nữa.
+pub fn run_pending_traps(shell: &Rc<RefCell<Shell>>) {
+    for sig in crate::jobctl::take_pending_signals() {
+        let Some((name, _)) = crate::builtins::trap_name(&sig.to_string()) else { continue };
+        if shell.borrow().traps.get(&name).is_some_and(|a| !a.is_empty()) {
+            run_trap(shell, &name);
+            if sig == libc::SIGINT {
+                crate::jobctl::take_interrupted();
+            }
+        }
+    }
+}
+
+/// trap EXIT — chạy đúng 1 lần khi shell thoát (mọi đường thoát).
+pub fn run_exit_trap(shell: &Rc<RefCell<Shell>>) {
+    if shell.borrow().traps.contains_key("EXIT") {
+        run_trap(shell, "EXIT");
+        shell.borrow_mut().traps.remove("EXIT");
+    }
+}
+
 /// Thoát shell (dùng cho `set -e` / `set -u`) — dọn job control như `exit`.
 fn exit_shell(shell: &Rc<RefCell<Shell>>, code: i32) -> ! {
+    shell.borrow_mut().set_last_status(code);
+    run_exit_trap(shell);
     if crate::jobctl::interactive() {
         crate::jobctl::shutdown(shell);
     }
@@ -734,7 +789,10 @@ fn spawn_external(
             let pgid = crate::jobctl::after_spawn(pid, 0, true);
             Ok(crate::jobctl::wait_foreground(shell, pgid, &[pid], &argv.join(" "), None))
         }
-        Err(e) => Ok(not_found_or_failed(prog, &e)),
+        Err(e) => {
+            crate::jobctl::reclaim_terminal();
+            Ok(not_found_or_failed(prog, &e))
+        }
     }
 }
 
@@ -784,8 +842,22 @@ fn fork_child(
             ChildKind::Job => crate::jobctl::child_setup(pgid, foreground),
             ChildKind::Capture => crate::jobctl::child_setup_capture(),
         }
+        // Subshell không kế thừa trap (trừ tín hiệu đang bị bỏ qua `trap ''`).
+        {
+            let mut sh = shell.borrow_mut();
+            let active: Vec<String> = sh.traps.iter().filter(|(_, a)| !a.is_empty()).map(|(n, _)| n.clone()).collect();
+            for name in active {
+                sh.traps.remove(&name);
+                if let Some((_, Some(sig))) = crate::builtins::trap_name(&name) {
+                    crate::jobctl::set_signal_disposition(sig, crate::jobctl::Disposition::Default);
+                }
+            }
+        }
         setup();
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell))).unwrap_or(1);
+        // trap EXIT đặt bên trong subshell chạy khi subshell kết thúc.
+        shell.borrow_mut().set_last_status(code);
+        run_exit_trap(shell);
         flush_std();
         unsafe { libc::_exit(code) };
     }

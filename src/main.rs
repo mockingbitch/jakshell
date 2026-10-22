@@ -82,6 +82,7 @@ fn main() -> Result<()> {
             eprintln!("jaksh: lỗi khi nạp cấu hình: {e}");
         }
         let code = config::run_script(&shell, &content).unwrap_or(1);
+        executor::run_exit_trap(&shell);
         std::process::exit(code);
     }
 
@@ -109,6 +110,15 @@ fn main() -> Result<()> {
     let mut rl: Editor<ShellHelper, rustyline::history::FileHistory> =
         Editor::with_config(config)?;
     rl.set_helper(Some(helper));
+    // Ctrl-X Ctrl-E: sửa dòng đang gõ trong $EDITOR rồi chạy (như bash).
+    rl.bind_sequence(
+        rustyline::Event::KeySeq(vec![rustyline::KeyEvent::ctrl('X'), rustyline::KeyEvent::ctrl('E')]),
+        rustyline::EventHandler::Conditional(Box::new(EditInEditor)),
+    );
+    if shell.borrow().ui.edit_mode == "vi" {
+        use rustyline::config::Configurer;
+        rl.set_edit_mode(rustyline::EditMode::Vi);
+    }
 
     let history_path = shell.borrow().history_path();
     let _ = rl.load_history(&history_path);
@@ -127,7 +137,25 @@ fn main() -> Result<()> {
             print_block_separator(&shell.borrow());
         }
         let prompt_str = prompt::render(&shell.borrow());
-        match rl.readline(&prompt_str) {
+        let readline = match rl.readline(&prompt_str) {
+            // Ctrl-X Ctrl-E đã lưu dòng đang gõ → mở editor, chạy nội dung sau khi sửa.
+            Err(ReadlineError::Interrupted) if EDIT_BUFFER.lock().map(|b| b.is_some()).unwrap_or(false) => {
+                let text = EDIT_BUFFER.lock().ok().and_then(|mut b| b.take()).unwrap_or_default();
+                match builtins::edit_in_editor(&shell, &text) {
+                    Ok(Some(edited)) if !edited.trim().is_empty() => {
+                        println!("{}", edited);
+                        Ok(edited)
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
+                        continue;
+                    }
+                }
+            }
+            other => other,
+        };
+        match readline {
             Ok(line) => {
                 let line = line.trim_end_matches('\n').to_string();
                 if line.trim().is_empty() {
@@ -210,6 +238,34 @@ fn main() -> Result<()> {
                         println!("\x1b[33m   Lưu ý: token đã từng nằm trong file — nên thu hồi (revoke) chúng.\x1b[0m");
                     }
                 }
+                // `history -d N`: dựng lại lịch sử không có entry đó.
+                // Lấy ra biến riêng: `if let` giữ RefMut tạm suốt cả khối → borrow lồng panic.
+                let delete_request = shell.borrow_mut().history_delete_request.take();
+                if let Some(idx) = delete_request {
+                    let mut all: Vec<String> = rl.history().iter().cloned().collect();
+                    if idx < all.len() {
+                        all.remove(idx);
+                    }
+                    let _ = rl.clear_history();
+                    for e in &all {
+                        let _ = rl.add_history_entry(e.as_str());
+                    }
+                    let _ = std::fs::write(&history_path, "");
+                    let _ = rl.save_history(&history_path);
+                    shell.borrow_mut().history = all;
+                }
+                // Lệnh `fc` vừa chạy được ghi vào lịch sử.
+                let added = std::mem::take(&mut shell.borrow_mut().history_add_request);
+                for e in added {
+                    let _ = rl.add_history_entry(e.as_str());
+                    let _ = rl.append_history(&history_path);
+                }
+                // `set -o vi` / `set -o emacs`.
+                let mode_request = shell.borrow_mut().edit_mode_request.take();
+                if let Some(mode) = mode_request {
+                    use rustyline::config::Configurer;
+                    rl.set_edit_mode(if mode == "vi" { rustyline::EditMode::Vi } else { rustyline::EditMode::Emacs });
+                }
                 // `history -c`: builtin không chạm được rustyline nên chỉ bật cờ.
                 if std::mem::take(&mut shell.borrow_mut().history_clear_requested) {
                     // save_history là no-op khi không có entry mới → tự cắt file.
@@ -256,8 +312,30 @@ fn main() -> Result<()> {
     }
 
     let _ = rl.save_history(&history_path);
+    executor::run_exit_trap(&shell);
     jobctl::shutdown(&shell);
     Ok(())
+}
+
+/// Dòng đang gõ khi nhấn Ctrl-X Ctrl-E (handler của rustyline phải Send + Sync).
+static EDIT_BUFFER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+struct EditInEditor;
+
+impl rustyline::ConditionalEventHandler for EditInEditor {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: rustyline::RepeatCount,
+        _positive: bool,
+        ctx: &rustyline::EventContext,
+    ) -> Option<rustyline::Cmd> {
+        if let Ok(mut b) = EDIT_BUFFER.lock() {
+            *b = Some(ctx.line().to_string());
+        }
+        // Thoát readline; vòng lặp chính thấy EDIT_BUFFER và mở editor.
+        Some(rustyline::Cmd::Interrupt)
+    }
 }
 
 fn run_line(shell: &Rc<RefCell<Shell>>, line: &str) -> Result<i32> {
@@ -598,6 +676,7 @@ fn run_oneshot(line: &str, args: &[String]) -> Result<()> {
             2
         }
     };
+    executor::run_exit_trap(&shell);
     std::process::exit(code);
 }
 
@@ -621,5 +700,6 @@ fn run_script(path: &str, args: &[String]) -> Result<()> {
         sh.positional = args.to_vec();
     }
     let code = config::run_script(&shell, &content).unwrap_or(1);
+    executor::run_exit_trap(&shell);
     std::process::exit(code);
 }

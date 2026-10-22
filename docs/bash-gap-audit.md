@@ -21,7 +21,8 @@
 | Audit ban đầu | 50/160 | Ctrl-C giết shell |
 | Job control | 54/160 | 30/30 |
 | Đợt 1 xong | 94/160 | 30/30 |
-| **Đợt 2 xong** | **152/160** (+55 case nâng cao: **207/215**) | **30/30** |
+| Đợt 2 xong | 152/160 (+55 case nâng cao: 207/215) | 30/30 |
+| **Đợt 3–4 xong** | **233/235** (2 khác biệt có chủ ý) | **31/31**, REPL **7/7** |
 
 **Đợt 1 đã làm:**
 - **Job control đầy đủ:** process group riêng; Ctrl-C/Ctrl-Z/Ctrl-\ không bao giờ giết hay treo shell; `fg`/`bg`/`jobs -l`/`wait`/`disown`/`kill %N`; khôi phục chế độ terminal; cảnh báo khi thoát còn job dừng.
@@ -48,7 +49,18 @@
 - **Hiệu năng ngang bash:** vòng lặp số học 100k lần 0,39 s (bash 0,36 s); 3000 lời gọi function qua `$(…)` 1,98 s (bash 2,42 s).
 - **Script thật:** `install.sh` của repo, `xdg-terminal-exec`, script mẫu dùng `set -euo pipefail` + `getopts` + `declare -A` + `while read` cho output giống hệt bash.
 
-**Còn lại:** Đợt 3 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
+**Đợt 3–4 đã làm:**
+- **`trap`:** `EXIT` (mọi đường thoát, kể cả subshell tự đặt), `ERR` (cùng điều kiện với `set -e`), tín hiệu `INT TERM HUP QUIT USR1 USR2 …` (chạy sau lệnh foreground như bash; Ctrl-C một job foreground cũng kích hoạt trap INT), `''` bỏ qua (lệnh con cũng bỏ qua), `-` trả về mặc định, `-p`, `-l`. `$?` giữ nguyên sau trap; subshell không kế thừa trap.
+- **Thư mục:** `pushd` / `popd` / `dirs` (`+N` `-N` `-v` `-p` `-l` `-c`), `cd` logical (giữ đường dẫn symlink như bash), `cd -P`, `CDPATH`, `cd -` in thư mục mới.
+- **Hệ thống:** `umask` (bát phân, `-S`, ký hiệu `u=rwx,g=rx,o=`), `ulimit` (`-a -n -c -s -t -u -v -f -l -m -d`, `-S/-H`, `unlimited`), `times`.
+- **Lịch sử & soạn dòng:** Ctrl-X Ctrl-E (mở `$EDITOR`), `fc` / `fc -s cũ=mới` / `fc -l`, `history -d N` (âm = từ cuối), `set -o vi` / `set -o emacs`, `[ui] edit_mode`, Tab hoàn thành `$BIẾN` / `${BIẾN`.
+- **Sửa lỗi:** lệnh không tồn tại làm REPL chết vì EIO (tiến trình con chiếm terminal trong `pre_exec` trước khi `exec` lỗi — có từ Đợt 1); `fc -l` panic khi lịch sử rỗng; RefCell bị mượn lồng trong REPL khi `history -d`.
+
+**Khác biệt có chủ ý còn lại:** alias hoạt động cả trong script / `-c`; `ls` có alias mặc định (`type -t ls` → `alias`).
+
+**Còn lại (Đợt 5 — vượt bash):** tô màu cú pháp khi gõ, Ctrl-R fuzzy + ưu tiên theo thư mục, lịch sử chia sẻ giữa các phiên kèm timestamp / cwd / exit code, cảnh báo lệnh nguy hiểm, `jaksh --check script.sh`. Ngoài ra: `$LINENO` chính xác, lỗi cú pháp kèm số dòng, `declare -f` in thân function, trap `DEBUG` / `RETURN` (hiện chỉ nhận, chưa chạy).
+
+**Còn lại trước đó:** Đợt 3 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
 
 ## 1. Bảng gap
 

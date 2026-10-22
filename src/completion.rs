@@ -45,6 +45,33 @@ impl Completer for ShellHelper {
         let cwd = self.shell.borrow().cwd.clone();
         let mut results = Vec::new();
 
+        // `$TÊN` / `${TÊN` → tên biến (cả mảng), ở bất kỳ vị trí nào trong từ.
+        if let Some(dollar) = frag.rfind('$') {
+            let after = &frag[dollar + 1..];
+            let (brace, prefix) = match after.strip_prefix('{') {
+                Some(p) => (true, p),
+                None => (false, after),
+            };
+            if prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                let sh = self.shell.borrow();
+                let mut names: Vec<&String> = sh
+                    .env
+                    .keys()
+                    .chain(sh.arrays.keys())
+                    .chain(sh.assocs.keys())
+                    .filter(|k| k.starts_with(prefix) && *k != "?")
+                    .collect();
+                names.sort();
+                names.dedup();
+                let base = &frag[..dollar];
+                for n in names {
+                    let replacement = if brace { format!("{}${{{}}}", base, n) } else { format!("{}${}", base, n) };
+                    results.push(Pair { display: format!("${}", n), replacement });
+                }
+                return Ok((start, results));
+            }
+        }
+
         if first_word {
             // Builtin shell commands
             for b in crate::builtins::BUILTINS {

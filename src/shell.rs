@@ -25,6 +25,12 @@ pub struct Shell {
     /// Mảng kết hợp (`declare -A m; m[k]=v`).
     pub assocs: HashMap<String, BTreeMap<String, String>>,
     pub functions: HashMap<String, Rc<crate::parser::Command>>,
+    /// `trap`: tên (EXIT, ERR, INT, TERM…) → lệnh. Chuỗi rỗng = bỏ qua tín hiệu.
+    pub traps: BTreeMap<String, String>,
+    /// Đang chạy 1 trap (không kích hoạt ERR lồng nhau).
+    pub in_trap: bool,
+    /// Ngăn xếp `pushd` / `popd` (không gồm thư mục hiện tại).
+    pub dirstack: Vec<PathBuf>,
     /// `break` / `continue` / `return` đang chờ xử lý.
     pub flow: Flow,
     pub loop_depth: u32,
@@ -56,6 +62,12 @@ pub struct Shell {
     pub history_clear_requested: bool,
     /// `history --scrub`: xoá khỏi lịch sử (cả file) các lệnh chứa bí mật.
     pub history_scrub_requested: bool,
+    /// `history -d N`: vị trí (0-based) cần xoá.
+    pub history_delete_request: Option<usize>,
+    /// Lệnh do `fc` chạy — thêm vào lịch sử thay cho chính dòng `fc`.
+    pub history_add_request: Vec<String>,
+    /// `set -o vi` / `set -o emacs`: REPL đổi chế độ soạn dòng.
+    pub edit_mode_request: Option<String>,
     pub history_cfg: HistoryConfig,
     last_status: i32,
     config_dir: PathBuf,
@@ -219,6 +231,8 @@ pub struct UiConfig {
     /// `curl` gõ trực tiếp ra terminal: in dòng HTTP status · content-type ·
     /// thời gian + format JSON. false = curl chạy nguyên bản như bash.
     pub pretty_curl: bool,
+    /// Chế độ soạn dòng: "emacs" (mặc định) hoặc "vi".
+    pub edit_mode: String,
 }
 
 impl Default for UiConfig {
@@ -227,6 +241,7 @@ impl Default for UiConfig {
             blank_line: true,
             separator: "none".into(),
             pretty_curl: true,
+            edit_mode: "emacs".into(),
         }
     }
 }
@@ -434,6 +449,9 @@ impl Shell {
             arrays: HashMap::new(),
             assocs: HashMap::new(),
             functions: HashMap::new(),
+            traps: BTreeMap::new(),
+            in_trap: false,
+            dirstack: Vec::new(),
             flow: Flow::Normal,
             loop_depth: 0,
             local_frames: Vec::new(),
@@ -452,6 +470,9 @@ impl Shell {
             history: Vec::new(),
             history_clear_requested: false,
             history_scrub_requested: false,
+            history_delete_request: None,
+            history_add_request: Vec::new(),
+            edit_mode_request: None,
             history_cfg: HistoryConfig::default(),
             last_status: 0,
             config_dir,
