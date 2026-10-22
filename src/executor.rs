@@ -869,10 +869,22 @@ fn fork_child(
 
 fn os_pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    // macOS has no pipe2: set FD_CLOEXEC right after creating the pipe.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc < 0 {
         return Err(anyhow!("pipe: {}", std::io::Error::last_os_error()));
     }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+    let pair = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    for fd in fds {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(anyhow!("fcntl: {}", std::io::Error::last_os_error()));
+        }
+    }
+    Ok(pair)
 }
 
 fn spawn_pipeline(shell: &Rc<RefCell<Shell>>, commands: &[Command], background: bool) -> Result<i32> {
