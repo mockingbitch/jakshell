@@ -62,7 +62,10 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
             shell.borrow_mut().aliases.insert(k, v);
         }
         for (k, v) in cfg.env {
-            shell.borrow_mut().set_var(&k, &v);
+            // Mục [env] là biến môi trường → export cho lệnh con.
+            if let Err(e) = shell.borrow_mut().export_var(&k, Some(&v)) {
+                eprintln!("jaksh: [env] {e}");
+            }
         }
     }
 
@@ -84,21 +87,32 @@ pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
     Ok(())
 }
 
-pub fn run_script(shell: &Rc<RefCell<Shell>>, content: &str) -> Result<()> {
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        match crate::lexer::tokenize(line) {
-            Ok(tokens) => match crate::parser::parse(&tokens) {
-                Ok(ast) => {
-                    let _ = crate::executor::execute(shell, &ast);
+/// Chạy nội dung script (`.jakshrc`, `source`, file script). Parse CẢ FILE một
+/// lượt để chuỗi / here-doc nhiều dòng hoạt động; nếu file có lỗi cú pháp thì
+/// báo lỗi rồi rơi về chạy từng dòng — một dòng hỏng không chặn cả `.jakshrc`.
+/// Trả về exit code của lệnh cuối.
+pub fn run_script(shell: &Rc<RefCell<Shell>>, content: &str) -> Result<i32> {
+    let content = content.strip_prefix("#!").map_or(content, |rest| rest.split_once('\n').map_or("", |(_, r)| r));
+    let whole = crate::lexer::tokenize(content).and_then(|t| crate::parser::parse(&t));
+    match whole {
+        Ok(ast) => crate::executor::execute(shell, &ast),
+        Err(first_err) => {
+            eprintln!("jaksh: lỗi cú pháp: {first_err} — chạy từng dòng thay thế");
+            let mut code = 0;
+            for (n, raw) in content.lines().enumerate() {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
-                Err(e) => eprintln!("jakshrc: lỗi cú pháp '{}': {}", line, e),
-            },
-            Err(e) => eprintln!("jakshrc: lỗi token '{}': {}", line, e),
+                match crate::lexer::tokenize(line).and_then(|t| crate::parser::parse(&t)) {
+                    Ok(ast) => code = crate::executor::execute(shell, &ast).unwrap_or(1),
+                    Err(e) => {
+                        eprintln!("jaksh: dòng {}: {}", n + 1, e);
+                        code = 2;
+                    }
+                }
+            }
+            Ok(code)
         }
     }
-    Ok(())
 }

@@ -14,6 +14,28 @@
   - `jaksh -c 'exit'` in "tạm biệt 👋" ra stdout.
 - **Điểm mạnh giữ nguyên:** glob, quoting, command substitution, redirect cơ bản, `cd -`, các tiện ích tương tác (gợi ý mờ, timing, giải thích exit code, `explain`, `--jak`).
 
+## Tiến độ
+
+| Mốc | Khớp bash (`run.py`) | `signals.py` |
+|---|---|---|
+| Audit ban đầu | 50/160 | Ctrl-C giết shell |
+| Job control | 54/160 | 30/30 |
+| **Đợt 1 xong** | **94/160** | **30/30** |
+
+**Đợt 1 đã làm:**
+- **Job control đầy đủ:** process group riêng; Ctrl-C/Ctrl-Z/Ctrl-\ không bao giờ giết hay treo shell; `fg`/`bg`/`jobs -l`/`wait`/`disown`/`kill %N`; khôi phục chế độ terminal; cảnh báo khi thoát còn job dừng.
+- **Exit code:** `$?` đúng sau từng lệnh; Ctrl-C bỏ phần còn lại của dòng.
+- **Cú pháp:** `&` là dấu phân tách, `! pipeline`.
+- **Redirect:** `N>&M`, `>&-`, `&>>`, `>|`, `<>`, `N<`, `exec 3>file`, `> file` không kèm lệnh; here-doc `<<EOF` / `<<-` / `<<'EOF'`; here-string `<<<`; `noclobber`.
+- **Biến:** biến shell tách khỏi env (chỉ `export` mới sang tiến trình con); `export -n`, `readonly`, `declare`/`typeset` (không mảng), `x+=`.
+- **Tham số & biến đặc biệt:** `$0 $1… $# $@ $* $$ $! $- $RANDOM $SECONDS $LINENO ${PIPESTATUS[@]}`; `shift`, `set --`, `source f args`, `jaksh -c 'cmd' name args`, đối số script.
+- **Chế độ không tương tác sạch:** không banner/"tạm biệt"; stdin không phải TTY thì chạy như script; script và `.jakshrc` được parse cả file (lỗi cú pháp thì rơi về chạy từng dòng); lỗi một lệnh không dừng script.
+- **Builtin:** `read` (`-r -p -s -t -n -d`, Ctrl-C ngắt được), `command [-v|-V]`, `type [-t -p -a]`, `builtin`, `hash`, `echo -e/-E/-n`, `kill -l / -s`.
+- **`set`:** `-e`, `-u`, `-x`, `-a`, `-C`, `-o pipefail`, `-o`/`+o`; `set` không đối số in biến.
+- **History:** lọc secret khi lưu và `history --scrub`.
+
+**Còn lại:** Đợt 2 trở đi, theo bảng dưới. Các mục đã xong ở trên vẫn để nguyên trong bảng để đối chiếu.
+
 ## 1. Bảng gap
 
 Mức độ: **P0** = làm hỏng lệnh hằng ngày hoặc script phổ biến · **P1** = hay dùng · **P2** = ít dùng.

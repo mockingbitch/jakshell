@@ -111,6 +111,11 @@ pub fn active() -> bool {
     SUSPEND_DEPTH.with(|d| d.get()) == 0 && STATE.with(|s| s.borrow().is_some())
 }
 
+/// Đang chạy bên trong `$(...)`?
+pub fn in_capture() -> bool {
+    SUSPEND_DEPTH.with(|d| d.get()) > 0
+}
+
 /// REPL tương tác (bất kể đang trong `$(...)` hay không)?
 pub fn interactive() -> bool {
     STATE.with(|s| s.borrow().is_some())
@@ -134,6 +139,11 @@ impl Drop for Suspend {
     fn drop(&mut self) {
         SUSPEND_DEPTH.with(|d| d.set(d.get() - 1));
     }
+}
+
+/// Có Ctrl-C chưa xử lý không (không xoá cờ — để `execute` còn bỏ phần sau).
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
 }
 
 /// Lấy và xoá cờ Ctrl-C.
@@ -195,10 +205,10 @@ pub fn reset_for_exec(cmd: &mut Command) {
 /// chờ lại một job cũ (`fg`).
 pub fn wait_foreground(shell: &Rc<RefCell<Shell>>, pgid: i32, pids: &[i32], cmd: &str, existing: Option<u32>) -> i32 {
     let flags = if active() { libc::WUNTRACED } else { 0 };
-    let mut last_code = 0;
+    let mut codes: Vec<i32> = Vec::with_capacity(pids.len());
     let mut stopped: Vec<i32> = Vec::new();
     let mut sigint = false;
-    for (i, &pid) in pids.iter().enumerate() {
+    for &pid in pids {
         let code = loop {
             let mut st = 0;
             let r = unsafe { libc::waitpid(pid, &mut st, flags) };
@@ -219,10 +229,14 @@ pub fn wait_foreground(shell: &Rc<RefCell<Shell>>, pgid: i32, pids: &[i32], cmd:
             }
             break libc::WEXITSTATUS(st);
         };
-        if i + 1 == pids.len() {
-            last_code = code;
-        }
+        codes.push(code);
     }
+    // Exit code pipeline = lệnh cuối; `set -o pipefail` → lệnh lỗi cuối cùng.
+    let last_code = if shell.borrow().opts.pipefail {
+        codes.iter().rev().find(|&&c| c != 0).copied().unwrap_or(0)
+    } else {
+        codes.last().copied().unwrap_or(0)
+    };
 
     // Lấy lại terminal + chế độ sạch; nhớ chế độ của job bị dừng để `fg` trả lại.
     let job_tmodes = if active() {
@@ -265,6 +279,7 @@ pub fn wait_foreground(shell: &Rc<RefCell<Shell>>, pgid: i32, pids: &[i32], cmd:
     if let Some(id) = existing {
         sh.jobs.retain(|j| j.id != id);
     }
+    sh.pipestatus = codes;
     last_code
 }
 

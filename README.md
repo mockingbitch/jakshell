@@ -46,7 +46,9 @@ Gõ ? hoặc help bất cứ lúc nào.
 
 ## Tính năng nổi bật
 
-- **POSIX-compatible** — pipe `|`, `&&`, `||`, `;`, redirect `> >> < 2> 2>> &>`, job nền, glob, biến, tilde, quote chuẩn.
+- **POSIX-compatible** — pipe `|`, `&&`, `||`, `;`, `&`, `!`; mọi dạng redirect (`2>&1`, `N>&M`, `>&-`, `&>>`, `>|`, `<>`), here-doc `<<EOF` / `<<-EOF` / `<<'EOF'`, here-string `<<<`; glob, biến, tilde, quote chuẩn; `$1…$#` `$@` `$?` `$$` `$!` `$RANDOM` `${PIPESTATUS[@]}`; `set -euxa` / `-o pipefail` / `-o noclobber`.
+- **Job control như bash** — Ctrl-C chỉ dừng lệnh đang chạy, **không bao giờ giết shell**; Ctrl-Z tạm dừng → `fg` / `bg` / `jobs` / `kill %1` / `wait` / `disown`.
+- **🔒 Lịch sử an toàn** — lệnh chứa token / mật khẩu (GitHub, AWS, API key, `Authorization:`, `user:pass@`…) **không được lưu** vào lịch sử; `history --scrub` dọn những thứ đã lỡ lưu.
 - **`explain <lệnh>`** — usage / tham số / ví dụ + chú thích từng cột output thật (ls, ps, df, du, free). 70+ lệnh.
 - **`--jak`** trên `ls / ps / df / du / git status / git branch` — tô màu + format lại.
 - **`jak …`** — `clean / backup / update / find / open / sysinfo / ip / weather / news / theme / git / version / self-update / lang`.
@@ -480,6 +482,10 @@ Tắt bằng `[timing] show_hint = false` trong `~/.jakshrc.toml`.
 | `📄` | File |
 | `▶` | Executable |
 
+**Lịch sử lệnh**: `history [N]`, `history -c`, `history | grep …`, `!!` `!$` `!*` `!N` `!-N` `!tiền_tố`. Giữ tối đa `[history] size` lệnh (mặc định 10000), ghi xuống đĩa sau mỗi lệnh.
+
+**🔒 Không lưu bí mật**: lệnh chứa token (GitHub `ghp_…`, GitLab, Slack, OpenAI/Anthropic, AWS `AKIA…`, Google, npm, JWT), header `Authorization:` / `X-Api-Key:`, URL `user:pass@host`, `curl -u user:pass`, `mysql -pXXX` hoặc biến kiểu `GITHUB_TOKEN=…` vẫn **chạy bình thường** nhưng không vào lịch sử (in 1 dòng 🔒 báo). `history --scrub` xoá những lệnh như vậy đã lỡ nằm trong lịch sử cũ. Gõ **dấu cách đầu dòng** để chủ động bỏ qua lịch sử cho bất kỳ lệnh nào.
+
 **Context-aware path**: `cd Ca<Tab>` → chỉ folders (lệnh `cd / pushd / popd / rmdir / chdir`); các lệnh khác hiện cả files + folders để navigation hoạt động.
 
 ---
@@ -552,6 +558,7 @@ pretty_curl = true          # curl ra terminal: dòng HTTP status + JSON đẹp 
 
 [history]
 size = 10000                # số lệnh tối đa giữ lại (như HISTSIZE)
+secret_filter = true        # không lưu lệnh chứa token / mật khẩu
 
 [timing]
 enabled = true
@@ -603,7 +610,9 @@ LANG = "en_US.UTF-8"
 
 ### `~/.jakshrc` — script khởi động (POSIX-like)
 
-Chạy SAU khi đọc `.jakshrc.toml`. Mỗi dòng là một lệnh shell hợp lệ:
+Chạy SAU khi đọc `.jakshrc.toml`. File được parse một lượt (chuỗi / here-doc nhiều dòng dùng được); nếu có lỗi cú pháp, JakShell báo dòng lỗi rồi vẫn chạy các dòng còn lại.
+
+> Như bash, biến gán thường (`EDITOR=vim`) **chỉ shell thấy** — muốn lệnh con (git, editor…) thấy thì dùng `export EDITOR=vim` hoặc mục `[env]` trong `.jakshrc.toml`.
 
 ```bash
 export PATH=$HOME/.local/bin:$PATH
@@ -716,13 +725,15 @@ JakShell/
     ├── lexer.rs         # Tokenizer
     ├── parser.rs        # AST (pipeline, redirect, seq)
     ├── expand.rs        # Variable / tilde / glob expansion
-    ├── executor.rs      # Run AST: pipes, redirects, background
+    ├── executor.rs      # Run AST: pipes, background, set -e/-u/-x, $PIPESTATUS
+    ├── redirect.rs      # Redirect: fd dup/close, here-doc, noclobber
+    ├── jobctl.rs        # Job control: process group, Ctrl-C/Ctrl-Z, fg/bg
     ├── builtins/mod.rs  # cd, alias, export, history, explain, bookmark…
     ├── prompt.rs        # Prompt + smart git segment
     ├── theme.rs         # Colors + themes
     ├── config.rs        # ~/.jakshrc.toml + ~/.jakshrc loader
     ├── completion.rs    # Tab completion (rustyline helper)
-    ├── history.rs       # !! / !$ / !N expansion + gộp dòng nối `\` khi lưu
+    ├── history.rs       # !! / !$ / !N, gộp dòng nối `\`, lọc secret
     ├── suggest.rs       # Did-you-mean
     ├── explain.rs       # 70+ command explanations + live annotators
     ├── pretty.rs        # --jak prettifier (ls/ps/df/du/git)

@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
-use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
-use crate::parser::{Redirect, RedirectKind};
+use crate::parser::Redirect;
 use crate::shell::Shell;
 
 pub const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "set",
     "echo", "source", ".", "history", "jobs", "fg", "bg", "kill",
     "help", "?", "which", "true", "false", "explain", "bookmark", "exec",
-    "eval", "wait", "disown",
+    "eval", "wait", "disown", "readonly", "declare", "typeset", "shift",
+    "read", "command", "type", "hash", "builtin",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -21,7 +21,11 @@ pub fn is_builtin(name: &str) -> bool {
 /// pipeline (`history | grep git`). Builtin còn lại (`cd`, `exit`, `export`…)
 /// trong bash chạy ở subshell nên vô tác dụng; ở đây vẫn rơi về lệnh ngoài.
 pub fn is_pipe_safe(name: &str) -> bool {
-    matches!(name, "history" | "alias" | "jobs" | "which" | "help" | "?" | "explain" | "echo" | "pwd" | "true" | "false")
+    matches!(
+        name,
+        "history" | "alias" | "jobs" | "which" | "help" | "?" | "explain" | "echo" | "pwd" | "true" | "false"
+            | "type" | "command"
+    )
 }
 
 /// Chạy builtin với stdout chuyển vào pipe, trả về (exit code, output) — để
@@ -35,10 +39,9 @@ pub fn run_captured(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Re
         buf
     });
     let code = {
-        flush_std();
-        let mut guard = RedirectGuard { saved: Vec::new(), open_files: Vec::new() };
-        guard.replace_fd(1, writer.as_raw_fd())?;
-        drop(writer);
+        let mut plan = crate::redirect::Plan::default();
+        plan.push(1, crate::redirect::FdAction::Open(writer.into()));
+        let guard = crate::redirect::apply_in_process(plan)?;
         let code = run(shell, argv, redirects);
         drop(guard);
         code
@@ -50,7 +53,12 @@ pub fn run_captured(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Re
 pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) -> Result<i32> {
     let cmd = argv[0].as_str();
     let args: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
-    let _guard = RedirectGuard::install(shell, redirects)?;
+    let guard = crate::redirect::apply_in_process(crate::redirect::plan(shell, redirects)?)?;
+    // `exec 3>file` / `exec >log` không kèm lệnh: redirect áp cho chính shell, giữ luôn.
+    if cmd == "exec" && args.is_empty() {
+        guard.persist();
+        return Ok(0);
+    }
     flush_std();
     let result = match cmd {
         "cd" => cd(shell, &args),
@@ -58,9 +66,18 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "exit" => exit(shell, &args),
         "export" => export(shell, &args),
         "unset" => unset(shell, &args),
+        "readonly" => readonly(shell, &args),
+        "declare" | "typeset" => declare(shell, &args),
+        "shift" => shift(shell, &args),
         "alias" => alias(shell, &args),
         "unalias" => unalias(shell, &args),
         "echo" => echo(&args),
+        "read" => read(shell, &args),
+        "command" => command(shell, &args),
+        "type" => type_(shell, &args),
+        // Lệnh luôn được tìm lại trong $PATH mỗi lần chạy → không có bảng hash.
+        "hash" => Ok(0),
+        "builtin" => Ok(0),
         "source" | "." => source(shell, &args),
         "history" => history(shell, &args),
         "jobs" => jobs(shell, &args),
@@ -73,7 +90,7 @@ pub fn run(shell: &Rc<RefCell<Shell>>, argv: &[String], redirects: &[Redirect]) 
         "which" => which(shell, &args),
         "true" => Ok(0),
         "false" => Ok(1),
-        "set" => Ok(0),
+        "set" => set(shell, &args),
         "explain" => crate::explain::run(shell, &argv[1..].to_vec()),
         "bookmark" => crate::bookmark::run(shell, argv),
         "exec" => exec_replace(shell, &args),
@@ -92,82 +109,6 @@ fn flush_std() {
 
 /// Save the original stdin/stdout/stderr file descriptors and apply the
 /// redirects. When dropped, restores the originals.
-struct RedirectGuard {
-    saved: Vec<(i32, i32)>, // (target_fd, saved_dup_fd)
-    open_files: Vec<std::fs::File>,
-}
-
-impl RedirectGuard {
-    fn install(shell: &Rc<RefCell<Shell>>, redirects: &[Redirect]) -> Result<Self> {
-        let mut guard = RedirectGuard { saved: Vec::new(), open_files: Vec::new() };
-        for r in redirects {
-            let target_pieces = crate::expand::expand_word(&shell.borrow(), &r.target, true);
-            let target_path = target_pieces.into_iter().next().ok_or_else(|| anyhow!("đích redirect rỗng"))?;
-            match r.kind {
-                RedirectKind::In => {
-                    let f = std::fs::File::open(&target_path)?;
-                    guard.replace_fd(0, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-                RedirectKind::Out => {
-                    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&target_path)?;
-                    guard.replace_fd(1, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-                RedirectKind::Append => {
-                    let f = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&target_path)?;
-                    guard.replace_fd(1, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-                RedirectKind::ErrOut => {
-                    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&target_path)?;
-                    guard.replace_fd(2, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-                RedirectKind::ErrAppend => {
-                    let f = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&target_path)?;
-                    guard.replace_fd(2, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-                RedirectKind::AllOut => {
-                    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&target_path)?;
-                    guard.replace_fd(1, f.as_raw_fd())?;
-                    guard.replace_fd(2, f.as_raw_fd())?;
-                    guard.open_files.push(f);
-                }
-            }
-        }
-        Ok(guard)
-    }
-
-    fn replace_fd(&mut self, target: i32, new_fd: i32) -> Result<()> {
-        unsafe {
-            let saved = libc::dup(target);
-            if saved < 0 {
-                return Err(anyhow!("dup({}) thất bại", target));
-            }
-            if libc::dup2(new_fd, target) < 0 {
-                libc::close(saved);
-                return Err(anyhow!("dup2({}, {}) thất bại", new_fd, target));
-            }
-            self.saved.push((target, saved));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for RedirectGuard {
-    fn drop(&mut self) {
-        flush_std();
-        unsafe {
-            for (target, saved) in self.saved.drain(..).rev() {
-                libc::dup2(saved, target);
-                libc::close(saved);
-            }
-        }
-    }
-}
-
 fn cd(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     let target = if args.is_empty() {
         dirs::home_dir().ok_or_else(|| anyhow!("không tìm được HOME"))?
@@ -188,10 +129,10 @@ fn cd(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     };
     let canon = std::fs::canonicalize(&abs).map_err(|e| anyhow!("cd {}: {}", abs.display(), e))?;
     let old = shell.borrow().cwd.clone();
-    shell.borrow_mut().env.insert("OLDPWD".into(), old.display().to_string());
+    shell.borrow_mut().export_var("OLDPWD", Some(&old.display().to_string()))?;
     std::env::set_current_dir(&canon)?;
     shell.borrow_mut().cwd = canon.clone();
-    shell.borrow_mut().env.insert("PWD".into(), canon.display().to_string());
+    shell.borrow_mut().export_var("PWD", Some(&canon.display().to_string()))?;
     Ok(0)
 }
 
@@ -217,35 +158,266 @@ fn exit(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     std::process::exit(code);
 }
 
-fn export(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    if args.is_empty() {
-        let env: Vec<(String, String)> = shell.borrow().env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let mut entries = env;
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (k, v) in entries {
-            println!("export {}={}", k, v);
+/// Bọc giá trị trong nháy kép kiểu bash (`declare -p`, `export -p`).
+fn dq(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for c in v.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            out.push('\\');
         }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// In biến dạng `declare -x NAME="v"` (sắp theo tên), lọc bằng `pick`.
+fn print_decls(shell: &Shell, pick: impl Fn(&str) -> bool) {
+    let mut names: Vec<&String> = shell.env.keys().filter(|k| pick(k) && *k != "?").collect();
+    names.sort();
+    for k in names {
+        let mut flags = String::new();
+        if shell.readonly.contains(k) {
+            flags.push('r');
+        }
+        if shell.exported.contains(k) {
+            flags.push('x');
+        }
+        let flags = if flags.is_empty() { "--".to_string() } else { format!("-{}", flags) };
+        println!("declare {} {}={}", flags, k, dq(&shell.env[k]));
+    }
+}
+
+fn export(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut unexport = false;
+    let mut names = Vec::new();
+    for a in args {
+        match *a {
+            "-n" => unexport = true,
+            "-p" => {}
+            "-f" => return Err(anyhow!("export: -f: chưa hỗ trợ function")),
+            _ => names.push(*a),
+        }
+    }
+    if names.is_empty() {
+        let sh = shell.borrow();
+        print_decls(&sh, |k| sh.exported.contains(k));
         return Ok(0);
     }
-    for a in args {
-        if let Some((k, v)) = a.split_once('=') {
-            shell.borrow_mut().set_var(k, v);
-        } else {
-            // export NAME (promote existing local var to env — we treat all as env already)
-            let cur = shell.borrow().env.get(*a).cloned();
-            if let Some(v) = cur {
-                std::env::set_var(a, v);
+    let mut code = 0;
+    for a in names {
+        let (k, v) = match a.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (a, None),
+        };
+        if !valid_name(k) {
+            eprintln!("jaksh: export: `{}`: tên biến không hợp lệ", a);
+            code = 1;
+            continue;
+        }
+        let mut sh = shell.borrow_mut();
+        let res = if unexport {
+            if let Some(v) = v {
+                sh.set_var(k, v)?;
             }
+            sh.unexport_var(k);
+            Ok(())
+        } else {
+            sh.export_var(k, v)
+        };
+        if let Err(e) = res {
+            eprintln!("jaksh: export: {e}");
+            code = 1;
+        }
+    }
+    Ok(code)
+}
+
+fn valid_name(k: &str) -> bool {
+    let mut c = k.chars();
+    matches!(c.next(), Some(f) if f.is_ascii_alphabetic() || f == '_') && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn unset(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut code = 0;
+    for a in args.iter().filter(|a| !matches!(**a, "-v" | "-f")) {
+        if let Err(e) = shell.borrow_mut().unset_var(a) {
+            eprintln!("jaksh: unset: {e}");
+            code = 1;
+        }
+    }
+    Ok(code)
+}
+
+/// `readonly NAME[=v]...` / `readonly -p`.
+fn readonly(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let names: Vec<&str> = args.iter().copied().filter(|a| *a != "-p").collect();
+    if names.is_empty() {
+        let sh = shell.borrow();
+        print_decls(&sh, |k| sh.readonly.contains(k));
+        return Ok(0);
+    }
+    for a in names {
+        let (k, v) = a.split_once('=').map_or((a, None), |(k, v)| (k, Some(v)));
+        if !valid_name(k) {
+            return Err(anyhow!("readonly: `{}`: tên biến không hợp lệ", a));
+        }
+        let mut sh = shell.borrow_mut();
+        if let Some(v) = v {
+            sh.set_var(k, v)?;
+        }
+        sh.readonly.insert(k.to_string());
+    }
+    Ok(0)
+}
+
+/// `declare` / `typeset` — phần không cần mảng: `-x` export, `+x` bỏ export,
+/// `-r` readonly, `-p` in, `-i` (số nguyên — giữ chuỗi, chưa có số học).
+fn declare(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut export = None;
+    let mut ro = false;
+    let mut names = Vec::new();
+    for a in args {
+        if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty() && !f.contains('=')) {
+            for f in flags.chars() {
+                match f {
+                    'x' => export = Some(true),
+                    'r' => ro = true,
+                    'p' | 'i' | 'g' | 'l' | 'u' => {}
+                    'a' | 'A' => return Err(anyhow!("declare: -{}: chưa hỗ trợ mảng", f)),
+                    'f' | 'F' => return Err(anyhow!("declare: -{}: chưa hỗ trợ function", f)),
+                    _ => return Err(anyhow!("declare: -{}: tuỳ chọn không hợp lệ", f)),
+                }
+            }
+        } else if a.strip_prefix('+') == Some("x") {
+            export = Some(false);
+        } else {
+            names.push(*a);
+        }
+    }
+    if names.is_empty() {
+        let sh = shell.borrow();
+        print_decls(&sh, |k| (!ro || sh.readonly.contains(k)) && (export != Some(true) || sh.exported.contains(k)));
+        return Ok(0);
+    }
+    for a in names {
+        let (k, v) = a.split_once('=').map_or((a, None), |(k, v)| (k, Some(v)));
+        if !valid_name(k) {
+            return Err(anyhow!("declare: `{}`: tên biến không hợp lệ", a));
+        }
+        let mut sh = shell.borrow_mut();
+        match (export, v) {
+            (Some(true), v) => sh.export_var(k, v)?,
+            (Some(false), v) => {
+                if let Some(v) = v {
+                    sh.set_var(k, v)?;
+                }
+                sh.unexport_var(k);
+            }
+            (None, Some(v)) => sh.set_var(k, v)?,
+            (None, None) => {
+                if !sh.env.contains_key(k) {
+                    sh.set_var(k, "")?;
+                }
+            }
+        }
+        if ro {
+            sh.readonly.insert(k.to_string());
         }
     }
     Ok(0)
 }
 
-fn unset(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    for a in args {
-        shell.borrow_mut().unset_var(a);
+/// `shift [n]` — bỏ n tham số vị trí đầu.
+fn shift(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let n: usize = match args.first() {
+        Some(a) => a.parse().map_err(|_| anyhow!("shift: {}: cần số", a))?,
+        None => 1,
+    };
+    let mut sh = shell.borrow_mut();
+    if n > sh.positional.len() {
+        return Ok(1);
+    }
+    sh.positional.drain(..n);
+    Ok(0)
+}
+
+/// `set` — tuỳ chọn shell (`-e -u -x -a -C`, `-o tên`, `+…` để tắt), `set --
+/// args` đặt tham số vị trí, `set -o` / `set +o` liệt kê, `set` không đối số
+/// in mọi biến.
+fn set(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    use crate::shell::ShellOpts;
+    if args.is_empty() {
+        let sh = shell.borrow();
+        let mut names: Vec<&String> = sh.env.keys().filter(|k| *k != "?").collect();
+        names.sort();
+        for k in names {
+            println!("{}={}", k, crate::builtins::sq(&sh.env[k]));
+        }
+        return Ok(0);
+    }
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if a == "--" {
+            shell.borrow_mut().positional = args[i + 1..].iter().map(|s| s.to_string()).collect();
+            return Ok(0);
+        }
+        let on = match a.chars().next() {
+            Some('-') => true,
+            Some('+') => false,
+            _ => {
+                // `set a b c` (không cờ) cũng đặt tham số vị trí.
+                shell.borrow_mut().positional = args[i..].iter().map(|s| s.to_string()).collect();
+                return Ok(0);
+            }
+        };
+        let body = &a[1..];
+        if body == "o" {
+            match args.get(i + 1) {
+                Some(name) => {
+                    if !shell.borrow_mut().opts.set(name, on) {
+                        return Err(anyhow!("set: {}: tên tuỳ chọn không hợp lệ", name));
+                    }
+                    i += 2;
+                    continue;
+                }
+                None => {
+                    let sh = shell.borrow();
+                    for (name, _) in ShellOpts::NAMES {
+                        let v = sh.opts.get(name).unwrap_or(false);
+                        if on {
+                            println!("{:<15} {}", name, if v { "on" } else { "off" });
+                        } else {
+                            println!("set {}o {}", if v { '-' } else { '+' }, name);
+                        }
+                    }
+                    return Ok(0);
+                }
+            }
+        }
+        for c in body.chars() {
+            match ShellOpts::name_of_flag(c) {
+                Some(name) => {
+                    shell.borrow_mut().opts.set(name, on);
+                }
+                // Cờ bash chưa hỗ trợ nhưng vô hại → bỏ qua thay vì làm hỏng script.
+                None if matches!(c, 'h' | 'B' | 'H' | 'm' | 'b' | 'f' | 'v' | 'T' | 'E' | 'P') => {}
+                None => return Err(anyhow!("set: -{}: tuỳ chọn không hợp lệ", c)),
+            }
+        }
+        i += 1;
     }
     Ok(0)
+}
+
+/// Bọc nháy đơn nếu cần (an toàn để dán lại vào shell) — dùng cho `set`, `set -x`.
+pub fn sq(v: &str) -> String {
+    if !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || "_-./:=@%+,".contains(c)) {
+        return v.to_string();
+    }
+    format!("'{}'", v.replace('\'', "'\\''"))
 }
 
 fn alias(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
@@ -276,28 +448,398 @@ fn unalias(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
 }
 
 fn echo(args: &[&str]) -> Result<i32> {
+    use std::io::Write;
+    // Cờ chỉ nhận khi toàn bộ là -n/-e/-E (`-ne`, `-en`…); `-x` là chữ thường.
     let mut newline = true;
+    let mut escapes = false;
     let mut start = 0;
-    if args.first() == Some(&"-n") {
-        newline = false;
-        start = 1;
+    for a in args {
+        match a.strip_prefix('-') {
+            Some(flags) if !flags.is_empty() && flags.chars().all(|c| matches!(c, 'n' | 'e' | 'E')) => {
+                for c in flags.chars() {
+                    match c {
+                        'n' => newline = false,
+                        'e' => escapes = true,
+                        _ => escapes = false,
+                    }
+                }
+                start += 1;
+            }
+            _ => break,
+        }
     }
-    let line = args[start..].join(" ");
-    if newline {
-        println!("{}", line);
-    } else {
-        print!("{}", line);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+    let mut line = args[start..].join(" ");
+    if escapes {
+        let (text, stop) = interpret_escapes(&line);
+        line = text;
+        if stop {
+            newline = false;
+        }
+    }
+    // Rust bỏ qua im lặng lỗi EBADF trên stdout → tự kiểm tra fd 1 còn mở.
+    if unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFD) } < 0 {
+        return Err(anyhow!("echo: lỗi ghi: Bad file descriptor"));
+    }
+    let mut out = std::io::stdout().lock();
+    let res = if newline { writeln!(out, "{}", line) } else { write!(out, "{}", line) };
+    // stdout đã đóng (`echo x >&-`) → lỗi ghi, exit 1 như bash.
+    if let Err(e) = res.and_then(|_| out.flush()) {
+        return Err(anyhow!("echo: lỗi ghi: {}", e));
     }
     Ok(0)
 }
 
+/// Escape kiểu `echo -e` / `$'...'`: \n \t \\ \a \b \e \f \r \v \0NNN \xHH.
+/// Trả cờ `true` khi gặp `\c` (ngừng in, kể cả xuống dòng).
+pub fn interpret_escapes(s: &str) -> (String, bool) {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('a') => out.push('\x07'),
+            Some('b') => out.push('\x08'),
+            Some('e') | Some('E') => out.push('\x1b'),
+            Some('f') => out.push('\x0c'),
+            Some('r') => out.push('\r'),
+            Some('v') => out.push('\x0b'),
+            Some('c') => return (out, true),
+            Some('0') => {
+                let mut n = 0u32;
+                for _ in 0..3 {
+                    match chars.peek().and_then(|c| c.to_digit(8)) {
+                        Some(d) => {
+                            n = n * 8 + d;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push(char::from_u32(n).unwrap_or('\0'));
+            }
+            Some('x') => {
+                let mut n = 0u32;
+                let mut got = 0;
+                while got < 2 {
+                    match chars.peek().and_then(|c| c.to_digit(16)) {
+                        Some(d) => {
+                            n = n * 16 + d;
+                            chars.next();
+                            got += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if got == 0 {
+                    out.push_str("\\x");
+                } else {
+                    out.push(char::from_u32(n).unwrap_or('?'));
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    (out, false)
+}
+
+/// `read [-r] [-s] [-p prompt] [-t giây] [-n N] [-d delim] [tên...]` — đọc 1
+/// dòng từ stdin, tách theo `$IFS` vào các biến (biến cuối nhận phần còn lại;
+/// không tên → `$REPLY`). Đọc từng byte (không buffer) để phần input còn lại
+/// vẫn dành cho lệnh sau; Ctrl-C ngắt được.
+fn read(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut raw = false;
+    let mut silent = false;
+    let mut prompt: Option<String> = None;
+    let mut timeout: Option<f64> = None;
+    let mut nchars: Option<usize> = None;
+    let mut delim = b'\n';
+    let mut names: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if names.is_empty() && a.len() > 1 && a.starts_with('-') {
+            let flags: Vec<char> = a[1..].chars().collect();
+            let mut k = 0;
+            while k < flags.len() {
+                let f = flags[k];
+                if matches!(f, 'p' | 't' | 'n' | 'N' | 'd' | 'a' | 'u') {
+                    let rest: String = flags[k + 1..].iter().collect();
+                    let val = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        args.get(i).ok_or_else(|| anyhow!("read: -{}: thiếu giá trị", f))?.to_string()
+                    };
+                    match f {
+                        'p' => prompt = Some(val),
+                        't' => timeout = Some(val.parse().map_err(|_| anyhow!("read: {}: thời gian không hợp lệ", val))?),
+                        'n' | 'N' => nchars = Some(val.parse().map_err(|_| anyhow!("read: {}: số không hợp lệ", val))?),
+                        'd' => delim = val.bytes().next().unwrap_or(0),
+                        'a' => return Err(anyhow!("read: -a: chưa hỗ trợ mảng")),
+                        _ => return Err(anyhow!("read: -u: chưa hỗ trợ")),
+                    }
+                    break;
+                }
+                match f {
+                    'r' => raw = true,
+                    's' => silent = true,
+                    'e' | 'i' => {}
+                    _ => return Err(anyhow!("read: -{}: tuỳ chọn không hợp lệ", f)),
+                }
+                k += 1;
+            }
+        } else {
+            names.push(a.to_string());
+        }
+        i += 1;
+    }
+
+    let tty = unsafe { libc::isatty(0) } == 1;
+    if let Some(p) = &prompt {
+        if tty {
+            eprint!("{}", p);
+        }
+    }
+    // -s: tắt echo của terminal trong lúc gõ (mật khẩu).
+    let saved_termios = if silent && tty {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            (libc::tcgetattr(0, &mut t) == 0).then(|| {
+                let mut quiet = t;
+                quiet.c_lflag &= !libc::ECHO;
+                libc::tcsetattr(0, libc::TCSANOW, &quiet);
+                t
+            })
+        }
+    } else {
+        None
+    };
+
+    let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut eof = false;
+    let mut timed_out = false;
+    let mut interrupted = false;
+    loop {
+        if nchars.is_some_and(|n| String::from_utf8_lossy(&bytes).chars().count() >= n) {
+            break;
+        }
+        // poll theo lát 100ms: kiểm tra timeout và Ctrl-C (handler đặt cờ).
+        let mut pfd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let wait_ms = match deadline {
+            Some(d) => {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    timed_out = true;
+                    break;
+                }
+                left.as_millis().min(100) as i32
+            }
+            None => 100,
+        };
+        let r = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
+        if crate::jobctl::interrupted() {
+            interrupted = true;
+            break;
+        }
+        if r <= 0 {
+            continue;
+        }
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(0, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n <= 0 {
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            eof = true;
+            break;
+        }
+        let c = b[0];
+        if !raw && c == b'\\' {
+            // `\` + xuống dòng = nối dòng; `\x` = ký tự x giữ nguyên.
+            let mut nb = [0u8; 1];
+            if unsafe { libc::read(0, nb.as_mut_ptr() as *mut libc::c_void, 1) } == 1 {
+                if nb[0] != b'\n' {
+                    bytes.push(nb[0]);
+                }
+            }
+            continue;
+        }
+        if c == delim && nchars.is_none() {
+            break;
+        }
+        bytes.push(c);
+    }
+    if let Some(t) = saved_termios {
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
+        if tty {
+            eprintln!();
+        }
+    }
+    if interrupted {
+        return Ok(130);
+    }
+
+    let line = String::from_utf8_lossy(&bytes).into_owned();
+    let ifs = shell.borrow().get_var("IFS").unwrap_or_else(|| " \t\n".into());
+    let is_ifs = |c: char| ifs.contains(c);
+    let mut sh = shell.borrow_mut();
+    if names.is_empty() {
+        sh.set_var("REPLY", &line)?;
+    } else {
+        let mut rest = line.trim_matches(|c: char| is_ifs(c) && c.is_whitespace());
+        let last = names.len() - 1;
+        for (k, name) in names.iter().enumerate() {
+            if k == last {
+                sh.set_var(name, rest.trim_end_matches(|c: char| is_ifs(c) && c.is_whitespace()))?;
+                break;
+            }
+            let end = rest.find(is_ifs).unwrap_or(rest.len());
+            sh.set_var(name, &rest[..end])?;
+            rest = rest[end..].trim_start_matches(|c: char| is_ifs(c) && c.is_whitespace());
+            // Ký tự IFS không phải khoảng trắng (vd `:`) chỉ ăn đúng 1 lần.
+            if let Some(c) = rest.chars().next().filter(|c| is_ifs(*c) && !c.is_whitespace()) {
+                rest = rest[c.len_utf8()..].trim_start_matches(|c: char| is_ifs(c) && c.is_whitespace());
+            }
+        }
+    }
+    if timed_out {
+        return Ok(142);
+    }
+    // Gặp EOF trước delimiter → 1 (biến vẫn được gán), như bash.
+    Ok(eof as i32)
+}
+
+/// Tìm `name` trong `$PATH` của shell (không phải của tiến trình — biến PATH
+/// có thể vừa được gán mà chưa export).
+fn path_lookup(shell: &Shell, name: &str) -> Option<std::path::PathBuf> {
+    let path = shell.get_var("PATH").unwrap_or_default();
+    which::which_in(name, Some(path), &shell.cwd).ok()
+}
+
+/// Cách shell sẽ hiểu `name`: alias / builtin / file.
+enum Kind {
+    Alias(String),
+    Builtin,
+    File(std::path::PathBuf),
+}
+
+fn classify(shell: &Shell, name: &str, all: bool) -> Vec<Kind> {
+    let mut out = Vec::new();
+    if let Some(v) = shell.aliases.get(name) {
+        out.push(Kind::Alias(v.clone()));
+    }
+    if is_builtin(name) || name == "jak" || name == "command" || name == "builtin" {
+        out.push(Kind::Builtin);
+    }
+    if all {
+        let path = shell.get_var("PATH").unwrap_or_default();
+        if let Ok(paths) = which::which_in_all(name, Some(path), &shell.cwd) {
+            out.extend(paths.map(Kind::File));
+        }
+    } else if out.is_empty() {
+        if let Some(p) = path_lookup(shell, name) {
+            out.push(Kind::File(p));
+        }
+    }
+    out
+}
+
+/// `command -v|-V name...` (dạng `command cmd args` do executor xử lý).
+fn command(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let verbose = args.first() == Some(&"-V");
+    let names: Vec<&str> = args.iter().copied().filter(|a| !a.starts_with('-')).collect();
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let sh = shell.borrow();
+    let mut code = 0;
+    for name in names {
+        match classify(&sh, name, false).into_iter().next() {
+            Some(Kind::Alias(v)) if verbose => println!("{} is aliased to `{}'", name, v),
+            Some(Kind::Alias(v)) => println!("alias {}={}", name, sq(&v)),
+            Some(Kind::Builtin) if verbose => println!("{} is a shell builtin", name),
+            Some(Kind::Builtin) => println!("{}", name),
+            Some(Kind::File(p)) if verbose => println!("{} is {}", name, p.display()),
+            Some(Kind::File(p)) => println!("{}", p.display()),
+            None => {
+                if verbose {
+                    eprintln!("jaksh: command: {}: không tìm thấy", name);
+                }
+                code = 1;
+            }
+        }
+    }
+    Ok(code)
+}
+
+/// `type [-t|-p|-P|-a] name...`
+fn type_(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
+    let mut only_type = false;
+    let mut only_path = false;
+    let mut all = false;
+    let mut names = Vec::new();
+    for a in args {
+        match *a {
+            "-t" => only_type = true,
+            "-p" | "-P" => only_path = true,
+            "-a" => all = true,
+            _ => names.push(*a),
+        }
+    }
+    let sh = shell.borrow();
+    let mut code = 0;
+    for name in names {
+        let kinds = classify(&sh, name, all);
+        if kinds.is_empty() {
+            if !only_type && !only_path {
+                eprintln!("jaksh: type: {}: không tìm thấy", name);
+            }
+            code = 1;
+            continue;
+        }
+        for k in kinds {
+            match k {
+                Kind::Alias(_) if only_path => {}
+                Kind::Builtin if only_path => {}
+                Kind::File(p) if only_path => println!("{}", p.display()),
+                Kind::Alias(_) if only_type => println!("alias"),
+                Kind::Builtin if only_type => println!("builtin"),
+                Kind::File(_) if only_type => println!("file"),
+                Kind::Alias(v) => println!("{} is aliased to `{}'", name, v),
+                Kind::Builtin => println!("{} is a shell builtin", name),
+                Kind::File(p) => println!("{} is {}", name, p.display()),
+            }
+            if !all {
+                break;
+            }
+        }
+    }
+    Ok(code)
+}
+
 fn source(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
-    let path = args.first().ok_or_else(|| anyhow!("dùng: source <tệp>"))?;
-    let content = std::fs::read_to_string(path).map_err(|e| anyhow!("source: {}", e))?;
-    crate::config::run_script(shell, &content)?;
-    Ok(0)
+    let path = args.first().ok_or_else(|| anyhow!("dùng: source <tệp> [đối số...]"))?;
+    let content = std::fs::read_to_string(path).map_err(|e| anyhow!("source: {}: {}", path, e))?;
+    // Có đối số → tạm thay tham số vị trí trong lúc chạy file (như bash).
+    let saved = (args.len() > 1).then(|| {
+        std::mem::replace(&mut shell.borrow_mut().positional, args[1..].iter().map(|s| s.to_string()).collect())
+    });
+    let code = crate::config::run_script(shell, &content);
+    if let Some(p) = saved {
+        shell.borrow_mut().positional = p;
+    }
+    code
 }
 
 fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
@@ -312,8 +854,12 @@ fn history(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
             sh.history_clear_requested = true;
             return Ok(0);
         }
+        ["--scrub"] => {
+            shell.borrow_mut().history_scrub_requested = true;
+            return Ok(0);
+        }
         [n] if n.parse::<usize>().is_ok() => {}
-        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c")),
+        _ => return Err(anyhow!("history: cách dùng: history [N] | history -c | history --scrub")),
     }
     let sh = shell.borrow();
     let total = sh.history.len();
@@ -568,9 +1114,9 @@ fn which(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
 /// `exec <cmd> [args...]` — thay thế tiến trình shell bằng <cmd> (POSIX).
 /// BẮT BUỘC cho login shell: GDM/Xsession khởi động session qua
 /// `$SHELL -c "exec <session>..."` — thiếu nó session chết ngay sau xác thực.
-/// Redirect đã được RedirectGuard áp vào fd trước khi gọi — process mới kế
+/// Redirect đã được áp vào fd của shell trước khi gọi — process mới kế
 /// thừa nguyên (và không bao giờ restore vì exec không quay lại).
-/// `exec` không args: no-op (bash giữ shell chạy tiếp).
+/// `exec` không args: chỉ áp redirect vĩnh viễn (xử lý ở `run`).
 fn exec_replace(shell: &Rc<RefCell<Shell>>, args: &[&str]) -> Result<i32> {
     if args.is_empty() {
         return Ok(0);

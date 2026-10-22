@@ -8,12 +8,25 @@ pub enum Token {
     OrIf,
     Semicolon,
     Ampersand,
-    Less,
-    Great,
-    DGreat,
-    ErrGreat,        // 2>
-    ErrDGreat,       // 2>>
-    AndGreat,        // &>  (both stdout+stderr)
+    /// Toán tử redirect, kèm số fd viết liền phía trước nếu có (`2>`, `3<`).
+    Redir(Option<i32>, RedirOp),
+    /// Here-doc đã đọc xong thân (`<<EOF` / `<<-EOF` / `<<'EOF'`). Thân có
+    /// delimiter trong nháy → 1 `Quoted` nguyên văn; không → được expand.
+    HereDoc(Option<i32>, Vec<WordPart>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirOp {
+    In,         // <
+    Out,        // >
+    Append,     // >>
+    Clobber,    // >|
+    ReadWrite,  // <>
+    DupOut,     // >&
+    DupIn,      // <&
+    AllOut,     // &>
+    AllAppend,  // &>>
+    HereString, // <<<
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +44,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let bytes: Vec<char> = input.chars().collect();
     let mut i = 0;
+    let mut pending_heredocs: Vec<PendingHereDoc> = Vec::new();
 
     while i < bytes.len() {
         let c = bytes[i];
@@ -40,6 +54,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         if c == '\n' || c == '\r' {
             tokens.push(Token::Semicolon);
             i += 1;
+            if c == '\r' && bytes.get(i) == Some(&'\n') {
+                i += 1;
+            }
+            // Here-doc mở trên dòng vừa hết: thân nằm ở các dòng tiếp theo.
+            if !pending_heredocs.is_empty() {
+                i = read_heredoc_bodies(&bytes, i, &mut tokens, &mut pending_heredocs);
+            }
             continue;
         }
         if c.is_whitespace() {
@@ -65,6 +86,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             }
             continue;
         }
+        // `N>` / `N<` — số fd viết liền ngay trước toán tử redirect.
+        if c.is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if matches!(bytes.get(j), Some('<') | Some('>')) {
+                let fd: i32 = bytes[i..j].iter().collect::<String>().parse().unwrap_or(-1);
+                i = lex_redirect(&bytes, j, Some(fd), &mut tokens, &mut pending_heredocs)?;
+                continue;
+            }
+        }
         // Operators
         match c {
             '|' => {
@@ -82,8 +115,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     tokens.push(Token::AndIf);
                     i += 2;
                 } else if bytes.get(i + 1) == Some(&'>') {
-                    tokens.push(Token::AndGreat);
-                    i += 2;
+                    if bytes.get(i + 2) == Some(&'>') {
+                        tokens.push(Token::Redir(None, RedirOp::AllAppend));
+                        i += 3;
+                    } else {
+                        tokens.push(Token::Redir(None, RedirOp::AllOut));
+                        i += 2;
+                    }
                 } else {
                     tokens.push(Token::Ampersand);
                     i += 1;
@@ -95,29 +133,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 i += 1;
                 continue;
             }
-            '<' => {
-                tokens.push(Token::Less);
-                i += 1;
-                continue;
-            }
-            '>' => {
-                if bytes.get(i + 1) == Some(&'>') {
-                    tokens.push(Token::DGreat);
-                    i += 2;
-                } else {
-                    tokens.push(Token::Great);
-                    i += 1;
-                }
-                continue;
-            }
-            '2' if bytes.get(i + 1) == Some(&'>') => {
-                if bytes.get(i + 2) == Some(&'>') {
-                    tokens.push(Token::ErrDGreat);
-                    i += 3;
-                } else {
-                    tokens.push(Token::ErrGreat);
-                    i += 2;
-                }
+            '<' | '>' => {
+                i = lex_redirect(&bytes, i, None, &mut tokens, &mut pending_heredocs)?;
                 continue;
             }
             _ => {}
@@ -128,8 +145,161 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         tokens.push(Token::Word(parts));
         i = next;
     }
+    // Here-doc trên dòng cuối không có thân (vd gõ 1 dòng) → thân rỗng.
+    if !pending_heredocs.is_empty() {
+        read_heredoc_bodies(&bytes, bytes.len(), &mut tokens, &mut pending_heredocs);
+    }
 
     Ok(tokens)
+}
+
+/// Here-doc đã gặp `<<DELIM` nhưng chưa đọc thân (thân bắt đầu ở dòng sau).
+struct PendingHereDoc {
+    token_idx: usize,
+    delim: String,
+    strip_tabs: bool,
+    quoted: bool,
+}
+
+/// Đọc 1 toán tử redirect bắt đầu tại `i` (ký tự `<` hoặc `>`), đẩy token, trả
+/// về vị trí kế tiếp. `<<` / `<<-` đọc luôn delimiter và đăng ký here-doc.
+fn lex_redirect(
+    bytes: &[char],
+    i: usize,
+    fd: Option<i32>,
+    tokens: &mut Vec<Token>,
+    pending: &mut Vec<PendingHereDoc>,
+) -> Result<usize> {
+    let at = |k: usize| bytes.get(i + k).copied();
+    let (op, len) = match (at(0), at(1), at(2)) {
+        (Some('<'), Some('<'), Some('<')) => (RedirOp::HereString, 3),
+        (Some('<'), Some('<'), _) => {
+            let strip_tabs = at(2) == Some('-');
+            let mut j = i + if strip_tabs { 3 } else { 2 };
+            while j < bytes.len() && (bytes[j] == ' ' || bytes[j] == '\t') {
+                j += 1;
+            }
+            let (parts, next) = read_word(bytes, j)?;
+            if parts.is_empty() {
+                return Err(anyhow!("thiếu delimiter sau '<<'"));
+            }
+            // Bất kỳ dạng nháy / `\` nào trong delimiter → thân không expand (bash).
+            let raw: String = bytes[j..next].iter().collect();
+            let quoted = raw.contains('\'') || raw.contains('"') || raw.contains('\\');
+            let delim: String = parts
+                .iter()
+                .map(|p| match p {
+                    WordPart::Literal(s) | WordPart::Quoted(s) => s.clone(),
+                    WordPart::Var(v) => format!("${}", v),
+                    WordPart::Tilde => "~".into(),
+                    WordPart::CmdSub(c) => format!("$({})", c),
+                })
+                .collect();
+            pending.push(PendingHereDoc { token_idx: tokens.len(), delim, strip_tabs, quoted });
+            tokens.push(Token::HereDoc(fd, Vec::new()));
+            return Ok(next);
+        }
+        (Some('<'), Some('&'), _) => (RedirOp::DupIn, 2),
+        (Some('<'), Some('>'), _) => (RedirOp::ReadWrite, 2),
+        (Some('<'), _, _) => (RedirOp::In, 1),
+        (Some('>'), Some('>'), _) => (RedirOp::Append, 2),
+        (Some('>'), Some('&'), _) => (RedirOp::DupOut, 2),
+        (Some('>'), Some('|'), _) => (RedirOp::Clobber, 2),
+        _ => (RedirOp::Out, 1),
+    };
+    tokens.push(Token::Redir(fd, op));
+    Ok(i + len)
+}
+
+/// Đọc thân các here-doc đang chờ, bắt đầu từ đầu dòng tại `start`. Trả về vị
+/// trí ngay sau dòng delimiter cuối cùng. Thiếu delimiter → lấy tới hết input
+/// (bash cũng chỉ cảnh báo).
+fn read_heredoc_bodies(bytes: &[char], start: usize, tokens: &mut [Token], pending: &mut Vec<PendingHereDoc>) -> usize {
+    let mut i = start;
+    for hd in pending.drain(..) {
+        let mut body = String::new();
+        while i < bytes.len() {
+            let line_end = bytes[i..].iter().position(|&c| c == '\n').map_or(bytes.len(), |p| i + p);
+            let mut line: String = bytes[i..line_end].iter().collect();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            i = if line_end < bytes.len() { line_end + 1 } else { bytes.len() };
+            let content = if hd.strip_tabs { line.trim_start_matches('\t') } else { line.as_str() };
+            if content == hd.delim {
+                break;
+            }
+            body.push_str(content);
+            body.push('\n');
+        }
+        let parts = if hd.quoted { vec![WordPart::Quoted(body)] } else { heredoc_parts(&body) };
+        if let Some(Token::HereDoc(_, slot)) = tokens.get_mut(hd.token_idx) {
+            *slot = parts;
+        }
+    }
+    i
+}
+
+/// Thân here-doc không nháy: `$VAR`, `${...}`, `$(...)`, `` `...` `` được thay;
+/// `\` chỉ escape `$` `` ` `` `\` và nối dòng — giống trong nháy kép nhưng `"`
+/// là ký tự thường. Chữ thường thành `Quoted` (không glob).
+pub fn heredoc_parts(body: &str) -> Vec<WordPart> {
+    let bytes: Vec<char> = body.chars().collect();
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    let flush = |buf: &mut String, parts: &mut Vec<WordPart>| {
+        if !buf.is_empty() {
+            parts.push(WordPart::Quoted(std::mem::take(buf)));
+        }
+    };
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == '\\' && i + 1 < bytes.len() {
+            let n = bytes[i + 1];
+            if n == '\n' {
+                i += 2;
+                continue;
+            }
+            if matches!(n, '$' | '`' | '\\') {
+                buf.push(n);
+                i += 2;
+                continue;
+            }
+        }
+        if c == '$' {
+            if bytes.get(i + 1) == Some(&'(') {
+                if let Ok((inner, next)) = read_cmd_sub_paren(&bytes, i + 2) {
+                    flush(&mut buf, &mut parts);
+                    parts.push(WordPart::CmdSub(inner));
+                    i = next;
+                    continue;
+                }
+            }
+            let (name, next) = read_var(&bytes, i + 1);
+            if !name.is_empty() {
+                flush(&mut buf, &mut parts);
+                parts.push(WordPart::Var(name));
+                i = next;
+                continue;
+            }
+        }
+        if c == '`' {
+            if let Ok((inner, next)) = read_backtick(&bytes, i + 1) {
+                flush(&mut buf, &mut parts);
+                parts.push(WordPart::CmdSub(inner));
+                i = next;
+                continue;
+            }
+        }
+        buf.push(c);
+        i += 1;
+    }
+    flush(&mut buf, &mut parts);
+    if parts.is_empty() {
+        parts.push(WordPart::Quoted(String::new()));
+    }
+    parts
 }
 
 fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
@@ -142,9 +312,6 @@ fn read_word(bytes: &[char], start: usize) -> Result<(Vec<WordPart>, usize)> {
         let c = bytes[i];
         // operator/whitespace ends word
         if c.is_whitespace() || matches!(c, '|' | '&' | ';' | '<' | '>') {
-            break;
-        }
-        if c == '2' && bytes.get(i + 1) == Some(&'>') && buf.is_empty() && parts.is_empty() {
             break;
         }
 
@@ -318,9 +485,10 @@ fn read_var(bytes: &[char], start: usize) -> (String, usize) {
         }
         return (name, i);
     }
-    // special single-char vars like $? $$ $!
+    // Biến đặc biệt 1 ký tự: $? $$ $! $# $@ $* $- và tham số vị trí $0..$9
+    // (`$10` = `$1` + "0", như POSIX — muốn tham số 10 phải viết `${10}`).
     if let Some(&c) = bytes.get(i) {
-        if matches!(c, '?' | '$' | '!' | '#') {
+        if matches!(c, '?' | '$' | '!' | '#' | '@' | '*' | '-') || c.is_ascii_digit() {
             return (c.to_string(), i + 1);
         }
     }
@@ -555,6 +723,66 @@ mod tests {
             word_parts("echo $(echo \")\")", 1),
             vec![WordPart::CmdSub("echo \")\"".into())]
         );
+    }
+
+    #[test]
+    fn fd_redirect_tokens() {
+        let t = tokenize("cmd >f 2>&1 3<in 2>&- &>>log >|x <<<s").unwrap();
+        let redirs: Vec<(Option<i32>, RedirOp)> = t
+            .iter()
+            .filter_map(|t| match t {
+                Token::Redir(fd, op) => Some((*fd, *op)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            redirs,
+            vec![
+                (None, RedirOp::Out),
+                (Some(2), RedirOp::DupOut),
+                (Some(3), RedirOp::In),
+                (Some(2), RedirOp::DupOut),
+                (None, RedirOp::AllAppend),
+                (None, RedirOp::Clobber),
+                (None, RedirOp::HereString),
+            ]
+        );
+        // chữ số dính trong từ không phải fd: `a2>f` = từ `a2` + `>f`
+        assert_eq!(words("echo a2>f"), vec!["echo", "a2", "f"]);
+    }
+
+    fn heredoc_body(input: &str) -> Vec<WordPart> {
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t {
+                Token::HereDoc(_, body) => Some(body),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn heredoc_unquoted_expands() {
+        assert_eq!(
+            heredoc_body("cat <<EOF\nhi $USER\nEOF\necho after"),
+            vec![WordPart::Quoted("hi ".into()), WordPart::Var("USER".into()), WordPart::Quoted("\n".into())]
+        );
+        // lệnh sau delimiter vẫn được tokenize
+        assert!(words("cat <<EOF\nx\nEOF\necho after").ends_with(&["echo".to_string(), "after".to_string()]));
+    }
+
+    #[test]
+    fn heredoc_quoted_and_dash() {
+        assert_eq!(heredoc_body("cat <<'EOF'\nraw $HOME\nEOF"), vec![WordPart::Quoted("raw $HOME\n".into())]);
+        assert_eq!(heredoc_body("cat <<-EOF\n\t\tindented\n\tEOF"), vec![WordPart::Quoted("indented\n".into())]);
+    }
+
+    #[test]
+    fn positional_vars() {
+        assert_eq!(word_parts("$10", 0), vec![WordPart::Var("1".into()), WordPart::Literal("0".into())]);
+        assert_eq!(word_parts("${10}", 0), vec![WordPart::Var("10".into())]);
+        assert_eq!(word_parts("\"$@\"", 0), vec![WordPart::Var("@".into())]);
     }
 
     #[test]

@@ -1,11 +1,27 @@
-use anyhow::Result;
-use std::collections::HashMap;
+use anyhow::{anyhow, Result};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::theme::Theme;
 
 pub struct Shell {
+    /// Mọi biến shell (kể cả biến chưa export). Chỉ tên trong `exported` mới
+    /// được truyền sang tiến trình con — như bash.
     pub env: HashMap<String, String>,
+    pub exported: HashSet<String>,
+    pub readonly: HashSet<String>,
+    /// `$0` và tham số vị trí `$1..` (`set --`, `shift`, đối số script).
+    pub arg0: String,
+    pub positional: Vec<String>,
+    /// `$!` — pid lệnh nền gần nhất.
+    pub last_bg_pid: Option<i32>,
+    /// Exit code từng lệnh của pipeline gần nhất (`${PIPESTATUS[i]}`).
+    pub pipestatus: Vec<i32>,
+    pub opts: ShellOpts,
+    started: Instant,
+    rng: Cell<u64>,
     pub aliases: HashMap<String, String>,
     pub cwd: PathBuf,
     pub theme: Theme,
@@ -18,6 +34,8 @@ pub struct Shell {
     /// `history -c` bật cờ này; vòng lặp chính (nơi giữ rustyline) xoá lịch
     /// sử thật + file rồi tắt cờ.
     pub history_clear_requested: bool,
+    /// `history --scrub`: xoá khỏi lịch sử (cả file) các lệnh chứa bí mật.
+    pub history_scrub_requested: bool,
     pub history_cfg: HistoryConfig,
     last_status: i32,
     config_dir: PathBuf,
@@ -27,6 +45,65 @@ pub struct Shell {
     pub ui: UiConfig,
     pub update: UpdateConfig,
     pub news: NewsConfig,
+}
+
+/// Tuỳ chọn `set` của bash.
+#[derive(Clone, Debug, Default)]
+pub struct ShellOpts {
+    /// `-e`: thoát khi lệnh lỗi (trừ vế trái của `&&` / `||` và `!`).
+    pub errexit: bool,
+    /// `-u`: dùng biến chưa gán là lỗi.
+    pub nounset: bool,
+    /// `-x`: in từng lệnh (đã expand) ra stderr trước khi chạy.
+    pub xtrace: bool,
+    /// `-o pipefail`: exit code pipeline = lệnh lỗi cuối cùng thay vì lệnh cuối.
+    pub pipefail: bool,
+    /// `-a`: mọi phép gán đều tự export.
+    pub allexport: bool,
+    /// `-C` / `-o noclobber`: `>` không ghi đè file đã có.
+    pub noclobber: bool,
+}
+
+impl ShellOpts {
+    /// Cặp (tên -o, chữ cái) — dùng cho `set -o`, `set -x`, `$-`.
+    pub const NAMES: [(&'static str, char); 6] = [
+        ("errexit", 'e'),
+        ("nounset", 'u'),
+        ("xtrace", 'x'),
+        ("pipefail", '\0'),
+        ("allexport", 'a'),
+        ("noclobber", 'C'),
+    ];
+
+    pub fn get(&self, name: &str) -> Option<bool> {
+        Some(match name {
+            "errexit" => self.errexit,
+            "nounset" => self.nounset,
+            "xtrace" => self.xtrace,
+            "pipefail" => self.pipefail,
+            "allexport" => self.allexport,
+            "noclobber" => self.noclobber,
+            _ => return None,
+        })
+    }
+
+    pub fn set(&mut self, name: &str, on: bool) -> bool {
+        let slot = match name {
+            "errexit" => &mut self.errexit,
+            "nounset" => &mut self.nounset,
+            "xtrace" => &mut self.xtrace,
+            "pipefail" => &mut self.pipefail,
+            "allexport" => &mut self.allexport,
+            "noclobber" => &mut self.noclobber,
+            _ => return false,
+        };
+        *slot = on;
+        true
+    }
+
+    pub fn name_of_flag(c: char) -> Option<&'static str> {
+        Self::NAMES.iter().find(|(_, f)| *f == c && c != '\0').map(|(n, _)| *n)
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -58,11 +135,13 @@ impl Default for UiConfig {
 pub struct HistoryConfig {
     /// Số lệnh tối đa giữ trong lịch sử (bộ nhớ + file), như HISTSIZE của bash.
     pub size: usize,
+    /// Không lưu lệnh chứa token / mật khẩu vào lịch sử (cảnh báo 1 dòng).
+    pub secret_filter: bool,
 }
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        Self { size: 10_000 }
+        Self { size: 10_000, secret_filter: true }
     }
 }
 
@@ -201,7 +280,14 @@ impl Shell {
         setup_ls_colors();
 
         let env: HashMap<String, String> = std::env::vars().collect();
+        // Mọi biến kế thừa từ môi trường đều đã được export.
+        let exported: HashSet<String> = env.keys().cloned().collect();
         let cwd = std::env::current_dir()?;
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1)
+            ^ ((std::process::id() as u64) << 32);
         let config_dir = dirs::home_dir()
             .map(|h| h.join(".config").join("jaksh"))
             .unwrap_or_else(|| PathBuf::from(".jaksh"));
@@ -209,12 +295,22 @@ impl Shell {
 
         Ok(Self {
             env,
+            exported,
+            readonly: HashSet::new(),
+            arg0: std::env::args().next().unwrap_or_else(|| "jaksh".into()),
+            positional: Vec::new(),
+            last_bg_pid: None,
+            pipestatus: Vec::new(),
+            opts: ShellOpts::default(),
+            started: Instant::now(),
+            rng: Cell::new(seed | 1),
             aliases: default_aliases(),
             cwd,
             theme: Theme::default(),
             jobs: Vec::new(),
             history: Vec::new(),
             history_clear_requested: false,
+            history_scrub_requested: false,
             history_cfg: HistoryConfig::default(),
             last_status: 0,
             config_dir,
@@ -253,24 +349,100 @@ impl Shell {
     }
 
     pub fn get_var(&self, name: &str) -> Option<String> {
-        if name == "?" {
-            return Some(self.last_status.to_string());
+        match name {
+            "?" => return Some(self.last_status.to_string()),
+            "PWD" => return Some(self.cwd.display().to_string()),
+            "0" => return Some(self.arg0.clone()),
+            "#" => return Some(self.positional.len().to_string()),
+            "@" | "*" => return Some(self.positional.join(" ")),
+            "$" => return Some(std::process::id().to_string()),
+            "!" => return self.last_bg_pid.map(|p| p.to_string()),
+            "-" => return Some(self.flags_string()),
+            "RANDOM" => {
+                // xorshift64 — đủ cho $RANDOM (0..32767), không cần crate.
+                let mut x = self.rng.get();
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.rng.set(x);
+                return Some((x % 32768).to_string());
+            }
+            "SECONDS" => return Some(self.started.elapsed().as_secs().to_string()),
+            "LINENO" => return Some(self.env.get("LINENO").cloned().unwrap_or_else(|| "1".into())),
+            "PIPESTATUS" => return self.pipestatus.first().map(|c| c.to_string()),
+            _ => {}
         }
-        if name == "PWD" {
-            return Some(self.cwd.display().to_string());
+        if let Ok(n) = name.parse::<usize>() {
+            return self.positional.get(n.wrapping_sub(1)).cloned().filter(|_| n > 0);
+        }
+        // `${PIPESTATUS[i]}` / `${PIPESTATUS[@]}` (chưa có mảng tổng quát).
+        if let Some(idx) = name.strip_prefix("PIPESTATUS[").and_then(|r| r.strip_suffix(']')) {
+            return match idx {
+                "@" | "*" => Some(self.pipestatus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ")),
+                _ => idx.parse::<usize>().ok().and_then(|i| self.pipestatus.get(i)).map(|c| c.to_string()),
+            };
         }
         self.env.get(name).cloned()
     }
 
-    pub fn set_var(&mut self, name: &str, value: &str) {
-        self.env.insert(name.into(), value.into());
-        // Also export to process env so child processes see it
-        std::env::set_var(name, value);
+    /// `$-` — chữ cái của các tuỳ chọn đang bật (+ `i` khi tương tác).
+    pub fn flags_string(&self) -> String {
+        let mut s: String = ShellOpts::NAMES
+            .iter()
+            .filter(|(n, c)| *c != '\0' && self.opts.get(n) == Some(true))
+            .map(|(_, c)| *c)
+            .collect();
+        if crate::jobctl::interactive() {
+            s.push('i');
+        }
+        s
     }
 
-    pub fn unset_var(&mut self, name: &str) {
-        self.env.remove(name);
+    /// Gán biến. Biến đã export (hoặc đang `set -a`) được đồng bộ sang env của
+    /// tiến trình để lệnh con thấy; biến thường thì chỉ shell thấy.
+    pub fn set_var(&mut self, name: &str, value: &str) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+        }
+        self.env.insert(name.into(), value.into());
+        if self.opts.allexport {
+            self.exported.insert(name.into());
+        }
+        if self.exported.contains(name) {
+            std::env::set_var(name, value);
+        }
+        Ok(())
+    }
+
+    /// `export NAME[=value]`.
+    pub fn export_var(&mut self, name: &str, value: Option<&str>) -> Result<()> {
+        if let Some(v) = value {
+            if self.readonly.contains(name) {
+                return Err(anyhow!("{}: biến chỉ đọc (readonly)", name));
+            }
+            self.env.insert(name.into(), v.into());
+        }
+        self.exported.insert(name.into());
+        if let Some(v) = self.env.get(name) {
+            std::env::set_var(name, v);
+        }
+        Ok(())
+    }
+
+    /// `export -n NAME` — vẫn là biến shell nhưng lệnh con không thấy nữa.
+    pub fn unexport_var(&mut self, name: &str) {
+        self.exported.remove(name);
         std::env::remove_var(name);
+    }
+
+    pub fn unset_var(&mut self, name: &str) -> Result<()> {
+        if self.readonly.contains(name) {
+            return Err(anyhow!("{}: không unset được biến chỉ đọc", name));
+        }
+        self.env.remove(name);
+        self.exported.remove(name);
+        std::env::remove_var(name);
+        Ok(())
     }
 
     pub fn add_job(&mut self, pgid: i32, pids: Vec<i32>, cmd: String) -> u32 {

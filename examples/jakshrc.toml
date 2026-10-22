@@ -28,6 +28,9 @@ pretty_curl = true
 [history]
 # Số lệnh tối đa giữ trong lịch sử (như HISTSIZE của bash).
 size = 10000
+# Không lưu lệnh chứa token / mật khẩu (GitHub/AWS/API key, Authorization:,
+# user:pass@…) vào lịch sử. `history --scrub` dọn những lệnh đã lỡ lưu.
+secret_filter = true
 
 [timing]
 # Hiển thị thời gian thực thi sau mỗi lệnh

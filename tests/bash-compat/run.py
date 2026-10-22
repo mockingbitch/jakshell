@@ -44,7 +44,7 @@ def run(shell, code, home):
 
 
 def main():
-    jaksh = sys.argv[1]
+    jaksh = os.path.abspath(sys.argv[1]) if os.sep in sys.argv[1] else sys.argv[1]
     only = None
     if "--only" in sys.argv:
         only = set(sys.argv[sys.argv.index("--only") + 1].split(","))

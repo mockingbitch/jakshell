@@ -17,6 +17,7 @@ mod news;
 mod parser;
 mod pretty;
 mod prompt;
+mod redirect;
 mod shell;
 mod suggest;
 mod theme;
@@ -56,8 +57,8 @@ fn main() -> Result<()> {
             println!("JakShell {}", env!("JAKSH_VERSION"));
             return Ok(());
         }
-        CliMode::Command(cmd) => {
-            return run_oneshot(&cmd);
+        CliMode::Command(cmd, rest) => {
+            return run_oneshot(&cmd, &rest);
         }
         CliMode::Script(path, script_args) => {
             return run_script(&path, &script_args);
@@ -67,6 +68,19 @@ fn main() -> Result<()> {
             return Ok(());
         }
         CliMode::Interactive => {} // tiếp tục xuống REPL bên dưới
+    }
+
+    // stdin không phải terminal (`echo 'ls' | jaksh`, `jaksh < script`) → chạy
+    // như script: không banner, không prompt, output sạch.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)?;
+        let shell = Rc::new(RefCell::new(Shell::new()?));
+        if let Err(e) = config::load(&shell) {
+            eprintln!("jaksh: lỗi khi nạp cấu hình: {e}");
+        }
+        let code = config::run_script(&shell, &content).unwrap_or(1);
+        std::process::exit(code);
     }
 
     // Job control: shell giữ terminal, miễn nhiễm Ctrl-C/Ctrl-Z; mỗi lệnh chạy
@@ -136,8 +150,16 @@ fn main() -> Result<()> {
                 };
                 // Paste nhiều dòng: mỗi lệnh 1 entry (gọn cho ↑ / Ctrl-R), còn
                 // dòng nối bằng `\` gộp lại thành 1 entry chạy được.
+                let filter = shell.borrow().history_cfg.secret_filter;
                 for entry in history::entries(&line) {
-                    rl.add_history_entry(entry).ok();
+                    match history::secret_kind(&entry).filter(|_| filter) {
+                        Some(kind) => eprintln!(
+                            "\x1b[33m🔒 Lệnh chứa {kind} — không lưu vào lịch sử.\x1b[0m \x1b[2m(tắt: [history] secret_filter = false)\x1b[0m"
+                        ),
+                        None => {
+                            rl.add_history_entry(entry).ok();
+                        }
+                    }
                 }
                 // Lưu tăng dần ra đĩa: lịch sử sống sót cả khi shell bị kill chứ
                 // không chỉ khi thoát sạch. append chỉ ghi entry mới (no-op rẻ
@@ -169,6 +191,23 @@ fn main() -> Result<()> {
                 let result = run_line(&shell, &line);
                 let elapsed = started.elapsed();
 
+                // `history --scrub`: lọc lại toàn bộ lịch sử, ghi đè file.
+                if std::mem::take(&mut shell.borrow_mut().history_scrub_requested) {
+                    let all: Vec<String> = rl.history().iter().cloned().collect();
+                    let kept: Vec<String> = all.iter().filter(|e| history::secret_kind(e).is_none()).cloned().collect();
+                    let removed = all.len() - kept.len();
+                    let _ = rl.clear_history();
+                    for e in &kept {
+                        let _ = rl.add_history_entry(e.as_str());
+                    }
+                    let _ = std::fs::write(&history_path, "");
+                    let _ = rl.save_history(&history_path);
+                    shell.borrow_mut().history = kept;
+                    println!("🔒 Đã xoá {removed} lệnh chứa token/mật khẩu khỏi lịch sử.");
+                    if removed > 0 {
+                        println!("\x1b[33m   Lưu ý: token đã từng nằm trong file — nên thu hồi (revoke) chúng.\x1b[0m");
+                    }
+                }
                 // `history -c`: builtin không chạm được rustyline nên chỉ bật cờ.
                 if std::mem::take(&mut shell.borrow_mut().history_clear_requested) {
                     // save_history là no-op khi không có entry mới → tự cắt file.
@@ -464,8 +503,8 @@ fn pick_tip() -> &'static str {
 enum CliMode {
     /// REPL tương tác (mặc định).
     Interactive,
-    /// `-c "cmd"` — chạy 1 lệnh rồi exit.
-    Command(String),
+    /// `-c "cmd" [tên [args...]]` — chạy 1 lệnh rồi exit (`$0` = tên, như bash).
+    Command(String, Vec<String>),
     /// Script file + args truyền vào.
     Script(String, Vec<String>),
     Help,
@@ -485,7 +524,7 @@ fn parse_cli(args: &[String]) -> CliMode {
                     eprintln!("jaksh: `-c` cần argument: lệnh để chạy");
                     std::process::exit(2);
                 };
-                return CliMode::Command(cmd.clone());
+                return CliMode::Command(cmd.clone(), args[i + 2..].to_vec());
             }
             // Flag tương thích bash/zsh — login / interactive đều no-op vì JakShell
             // luôn nạp .jakshrc khi mở.
@@ -538,23 +577,31 @@ fn print_cli_help() {
 
 /// Chạy 1 dòng lệnh non-interactive: nạp config, parse + execute, exit với mã trả về.
 /// KHÔNG in banner / greeting / timing — output phải sạch cho tool gọi (VSCode, CI, ...).
-fn run_oneshot(line: &str) -> Result<()> {
+fn run_oneshot(line: &str, args: &[String]) -> Result<()> {
     let shell = Rc::new(RefCell::new(Shell::new()?));
     if let Err(e) = config::load(&shell) {
         eprintln!("\x1b[33mjaksh: lỗi khi nạp cấu hình: {e}\x1b[0m");
+    }
+    {
+        let mut sh = shell.borrow_mut();
+        if let Some((name, rest)) = args.split_first() {
+            sh.arg0 = name.clone();
+            sh.positional = rest.to_vec();
+        }
     }
     let code = match run_line(&shell, line) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
-            1
+            2
         }
     };
     std::process::exit(code);
 }
 
-/// Chạy script file từng dòng. Bỏ qua dòng trống và comment `#`.
-fn run_script(path: &str, _args: &[String]) -> Result<()> {
+/// Chạy file script: `$0` = đường dẫn, `$1..` = đối số. Parse cả file một lượt
+/// (chuỗi / here-doc nhiều dòng hoạt động) — xem `config::run_script`.
+fn run_script(path: &str, args: &[String]) -> Result<()> {
     let shell = Rc::new(RefCell::new(Shell::new()?));
     if let Err(e) = config::load(&shell) {
         eprintln!("\x1b[33mjaksh: lỗi khi nạp cấu hình: {e}\x1b[0m");
@@ -563,22 +610,14 @@ fn run_script(path: &str, _args: &[String]) -> Result<()> {
         Ok(c) => c,
         Err(e) => {
             eprintln!("\x1b[31mjaksh: không đọc được {path}: {e}\x1b[0m");
-            std::process::exit(1);
+            std::process::exit(127);
         }
     };
-    let mut last_code = 0;
-    for raw in content.lines() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        match run_line(&shell, raw) {
-            Ok(c) => last_code = c,
-            Err(e) => {
-                eprintln!("\x1b[31mjaksh: {e}\x1b[0m");
-                last_code = 1;
-            }
-        }
+    {
+        let mut sh = shell.borrow_mut();
+        sh.arg0 = path.to_string();
+        sh.positional = args.to_vec();
     }
-    std::process::exit(last_code);
+    let code = config::run_script(&shell, &content).unwrap_or(1);
+    std::process::exit(code);
 }
