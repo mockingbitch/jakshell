@@ -7,6 +7,49 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.1.0] — Tương thích bash: script, job control, lịch sử thông minh
+
+Bản lớn nhất từ trước tới nay: jaksh chạy được script bash thật (đối chiếu tự động với bash: **233/235** case khớp), Ctrl-C không bao giờ giết shell, và có thêm những thứ bash không có. Chi tiết từng hạng mục: [`docs/bash-gap-audit.md`](docs/bash-gap-audit.md).
+
+### Đã thêm
+
+- **Viết script như bash** — `if/elif/else`, `for … in`, `for ((;;))`, `while/until`, `case` (`;;` `;&` `;;&`), function + `local` / `return`, `break/continue N`, `{ }`, subshell `( )`, `[[ … ]]` (glob, `=~` + `BASH_REMATCH`), `$(( ))` / `(( ))` / `let`, `${x:-…}` `${#x}` `${x##*/}` `${x//a/b}` `${x:1:3}` `${x^^}` và các toán tử khác, brace `{a,b}` `{1..10}`, mảng chỉ số + mảng kết hợp, `<(…)`, `$'…'`, tách từ theo `$IFS`. Subshell, pipeline và `$(…)` chạy bằng fork thật nên `cat f | while read l; do …; done` hoạt động.
+- **Redirect đầy đủ** — `2>&1`, `N>&M`, `>&-`, `&>>`, `>|`, `<>`, `exec 3>file`, here-doc `<<EOF` / `<<-EOF` / `<<'EOF'`, here-string `<<<`.
+- **Job control như bash** — Ctrl-C / Ctrl-Z / Ctrl-\ chỉ tới lệnh đang chạy; `fg`, `bg`, `jobs -l`, `wait`, `disown`, `kill %N`; khôi phục chế độ terminal; cảnh báo khi thoát còn job dừng.
+- **`trap`** (`EXIT`, `ERR`, tín hiệu), `set -euxa` / `-o pipefail` / `-o noclobber`, `shopt`.
+- **Builtin mới** — `read`, `printf` (viết lại, có `-v`), `test` / `[`, `command`, `type`, `declare` / `local` / `readonly` / `export -n`, `getopts`, `mapfile`, `shift`, `pushd` / `popd` / `dirs`, `umask`, `ulimit`, `times`, `fc`, `history -d`.
+- **Tham số & biến** — `$1…`, `"$@"`, `$#`, `$$`, `$!`, `$RANDOM`, `$SECONDS`, `${PIPESTATUS[@]}`, `$FUNCNAME`, `IFS`, `PPID`, `UID`, `SHLVL`…; `jaksh -c 'cmd' tên đối_số`; script nhận đối số.
+- **Gõ lệnh** — `for` / `if` / function / nháy / here-doc chưa xong thì Enter xuống dòng gõ tiếp; **Ctrl-X Ctrl-E** mở dòng đang gõ trong `$EDITOR`; `set -o vi`; Tab hoàn thành `$BIẾN`.
+- **Vượt bash** — **tô màu cú pháp** khi gõ (lệnh sai đỏ, đúng xanh); **Ctrl-R tìm fuzzy** ưu tiên lệnh ở thư mục hiện tại; **lịch sử kèm thời điểm / thư mục / exit code / thời lượng**, chia sẻ giữa các tab (`history --long`, `--here`, `--failed`); **hỏi xác nhận lệnh nguy hiểm** (`rm -rf /`, `chmod -R 777 /`, `dd of=/dev/sda`, `git push -f` lên `main`…); **`jaksh --check script.sh`** báo lỗi cú pháp kèm số dòng.
+- **🔒 Không lưu token / mật khẩu vào lịch sử** (GitHub, AWS, API key, `Authorization:`, `user:pass@`…); `history --scrub` dọn những gì đã lỡ lưu.
+- **History** — `!!` `!$` `!*` `!N` `!-N` `!prefix`, `history N`, `history | grep`, giữ 10000 lệnh (`[history] size`).
+- **curl** — tự bỏ chế độ đẹp khi dùng `-o/-O/-N/-v/-w`, nhận stdin, giữ nguyên output nhị phân; `[ui] pretty_curl = false` để tắt.
+
+### Đã sửa
+
+- **Ctrl-C khi lệnh đang chạy giết luôn jaksh** — giờ shell không bao giờ chết vì Ctrl-C / Ctrl-Z.
+- `$?` sai khi nhiều lệnh trên cùng dòng (`false; echo $?` in `0`).
+- `cmd & cmd2` báo lỗi cú pháp.
+- Paste lệnh `curl … \` nhiều dòng có dòng thụt lề sinh đối số rỗng ("blank argument").
+- `jaksh -c 'exit'` in "tạm biệt" ra stdout; `echo cmd | jaksh` hiện banner.
+- `\*` vẫn bị glob.
+
+### Thay đổi hành vi (như bash)
+
+- **`$var` và `$(…)` không nằm trong nháy được tách từ** theo `$IFS`. Đường dẫn có dấu cách cần nháy: `cd "$(dirname "$f")"`.
+- **Biến gán thường không còn tự export** sang lệnh con — dùng `export X=…` hoặc mục `[env]` trong `.jakshrc.toml`.
+- `cd` / gán biến bên trong `$(…)` hoặc pipeline không ảnh hưởng shell chính.
+- **Script lỗi cú pháp** chạy phần trước lỗi rồi dừng với exit 2, báo đúng dòng (trước đây chạy tiếp từng dòng). `.jakshrc` vẫn bỏ qua dòng lỗi và chạy tiếp.
+- Ctrl-R mở bộ tìm fuzzy thay cho tìm kiếm tuần tự của readline.
+- Lịch sử chuyển sang `~/.config/jaksh/history.jsonl` — lịch sử cũ được tự nhập lần đầu, file cũ giữ nguyên.
+
+### Tài liệu & kiểm thử
+
+- `docs/bash-gap-audit.md` — so sánh chi tiết với bash và tiến độ từng đợt.
+- `tests/bash-compat/` — 235 case đối chiếu với bash + kiểm thử tương tác qua pty (Ctrl-C/Ctrl-Z, REPL, lịch sử, chạy lồng trong bash).
+
+---
+
 ## [v1.0.11] — `eval` + command substitution `$(...)` / backticks
 
 ### Đã thêm
