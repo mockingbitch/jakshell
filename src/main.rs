@@ -49,7 +49,7 @@ fn main() -> Result<()> {
     //   jaksh                          → REPL tương tác (mặc định)
     //   jaksh -c "cmd"                 → chạy 1 lệnh rồi exit (không banner/timing)
     //   jaksh script.sh [args...]      → chạy script từng dòng rồi exit
-    //   jaksh -l / --login             → flag tương thích (no-op, accept không lỗi)
+    //   jaksh -l / --login             → login shell: đọc /etc/profile + ~/.profile
     //   jaksh -i / --interactive       → ép interactive (mặc định khi không có -c/script)
     //   jaksh -V / --version           → in version rồi exit
     //   jaksh -h / --help              → in help rồi exit
@@ -693,8 +693,8 @@ fn parse_cli(args: &[String]) -> CliMode {
                 };
                 return CliMode::Command(cmd.clone(), args[i + 2..].to_vec());
             }
-            // Flag tương thích bash/zsh — login / interactive đều no-op vì JakShell
-            // luôn nạp .jakshrc khi mở.
+            // `-l`: login shell (đọc profile — xem config::is_login_shell).
+            // `-i`: tương thích, JakShell luôn nạp .jakshrc khi mở.
             "-l" | "--login" | "-i" | "--interactive" => {}
             "-V" | "--version" => return CliMode::Version,
             "-h" | "--help" => return CliMode::Help,
@@ -730,6 +730,7 @@ fn print_cli_help() {
     println!("  jaksh                          REPL tương tác (mặc định)");
     println!("  jaksh -c \"<lệnh>\"              chạy 1 lệnh rồi exit");
     println!("  jaksh <script.sh> [args...]    chạy script rồi exit");
+    println!("  jaksh -l                       login shell: đọc /etc/profile + ~/.profile trước");
     println!("  jaksh --check <script.sh>...   kiểm tra cú pháp (báo số dòng), không chạy  (= -n)");
     println!();
     println!("OPTIONS:");

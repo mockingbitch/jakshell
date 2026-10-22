@@ -29,7 +29,52 @@ struct RcConfig {
     env: std::collections::HashMap<String, String>,
 }
 
+/// jaksh đang chạy làm login shell? (`argv[0]` bắt đầu bằng `-` — kiểu getty /
+/// sshd / su -l — hoặc có `-l` / `--login` trước lệnh / script.)
+pub fn is_login_shell() -> bool {
+    let mut args = std::env::args();
+    if args.next().is_some_and(|a0| a0.starts_with('-')) {
+        return true;
+    }
+    for a in args {
+        match a.as_str() {
+            "-l" | "--login" => return true,
+            // Hết phần cờ của jaksh.
+            "-c" | "--" => return false,
+            other if !other.starts_with('-') => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Login shell: đọc `/etc/profile` rồi `~/.jaksh_profile` (nếu có) hoặc
+/// `~/.profile` — như bash. Nhờ đó PATH do rustup / nvm / ~/.local/bin… thêm
+/// vào `~/.profile` có hiệu lực cho cả phiên đăng nhập khi jaksh là shell mặc định.
+fn load_login_profile(shell: &Rc<RefCell<Shell>>) {
+    let home = shell.borrow().get_var("HOME").unwrap_or_default();
+    let user_profile = [".jaksh_profile", ".profile"]
+        .iter()
+        .map(|f| std::path::Path::new(&home).join(f))
+        .find(|p| p.is_file());
+    let files = std::iter::once(std::path::PathBuf::from("/etc/profile")).chain(user_profile);
+    for path in files.filter(|p| p.is_file()) {
+        match std::fs::read_to_string(&path) {
+            // Khối lỗi được bỏ qua (như .jakshrc) — profile hỏng không chặn đăng nhập.
+            Ok(content) => {
+                if let Err(e) = run_rc(shell, &content) {
+                    eprintln!("jaksh: {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => eprintln!("jaksh: {}: {}", path.display(), e),
+        }
+    }
+}
+
 pub fn load(shell: &Rc<RefCell<Shell>>) -> Result<()> {
+    if is_login_shell() {
+        load_login_profile(shell);
+    }
     let toml_path = shell.borrow().rc_toml_path();
     if toml_path.exists() {
         let content = std::fs::read_to_string(&toml_path)?;

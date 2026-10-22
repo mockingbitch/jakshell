@@ -2,8 +2,15 @@
 # Được chạy SAU khi đã đọc ~/.jakshrc.toml.
 # Mỗi dòng là một lệnh shell hợp lệ (alias, export, source, ...).
 
-# Ví dụ: thêm thư mục bin cá nhân vào PATH
-export PATH=$HOME/.local/bin:$PATH
+# Ví dụ: thêm thư mục bin cá nhân vào PATH — chỉ thêm khi chưa có, để mở
+# jaksh lồng nhau (VSCode, tmux, `jaksh` trong jaksh) không lặp lại.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
+# Công cụ cài qua rustup / cargo (nếu có).
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 # Ví dụ alias ngắn ngoài file TOML
 # Lưu ý: alias có giá trị nhiều từ phải dùng nháy kép — nếu không, từ thứ 2
