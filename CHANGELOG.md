@@ -7,6 +7,15 @@ tuân thủ [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v1.1.3] — Sửa lỗi treo khi mở shell trên macOS
+
+### Đã sửa
+
+- **Mở terminal bị treo, không vào được jaksh trên macOS** — `install.sh` chép binary mới đè lên file cũ (`cp -f`); trên Apple Silicon kernel vẫn giữ chữ ký của file cũ nên mọi lần chạy `jaksh` (kể cả `jaksh --version`) treo vĩnh viễn trước khi kịp chạy. Giờ `install.sh` xoá file cũ trước, chép mới rồi ký lại (`codesign`). Nếu đang bị treo: chạy lại `./install.sh` từ một shell khác (zsh/bash), hoặc `rm -f ~/.local/bin/jaksh` rồi chép lại binary. Các tiến trình jaksh đã treo chỉ biến mất sau khi khởi động lại máy.
+- **`jaksh -lic '…'` báo "tham số không nhận"** — VSCode / Claude Code và nhiều công cụ khác gọi shell với cụm cờ gộp `-lic` để lấy PATH. jaksh giờ tách cụm cờ như bash: `-lic` = `-l -i -c`.
+
+---
+
 ## [v1.1.2] — Sửa lỗi build trên macOS
 
 ### Đã sửa
