@@ -36,7 +36,7 @@ pub fn is_login_shell() -> bool {
     if args.next().is_some_and(|a0| a0.starts_with('-')) {
         return true;
     }
-    for a in args {
+    for a in expand_short_flags(&args.collect::<Vec<_>>()) {
         match a.as_str() {
             "-l" | "--login" => return true,
             // Hết phần cờ của jaksh.
@@ -46,6 +46,34 @@ pub fn is_login_shell() -> bool {
         }
     }
     false
+}
+
+/// Tách cụm cờ ngắn như bash: `-lic cmd` → `-l -i -c cmd` (VSCode / Claude Code
+/// gọi `$SHELL -lic '…'` để lấy PATH). Chỉ tách phần cờ đứng đầu, gồm toàn ký tự
+/// `l` `i` `c`; từ sau `-c` / `--` / tham số đầu tiên trở đi giữ nguyên.
+pub fn expand_short_flags(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        let cluster = a
+            .strip_prefix('-')
+            .filter(|s| s.len() > 1 && s.chars().all(|c| "lic".contains(c)));
+        match cluster {
+            // `-c` luôn đặt cuối để `-ci cmd` vẫn hiểu `cmd` là lệnh.
+            Some(flags) => {
+                out.extend(flags.chars().filter(|&c| c != 'c').map(|c| format!("-{c}")));
+                if flags.contains('c') {
+                    out.push("-c".into());
+                }
+            }
+            None => out.push(a.clone()),
+        }
+        if out.last().is_some_and(|l| l == "-c" || l == "--" || !l.starts_with('-')) {
+            break;
+        }
+    }
+    out.extend(iter.cloned());
+    out
 }
 
 /// Login shell: đọc `/etc/profile` rồi `~/.jaksh_profile` (nếu có) hoặc
@@ -173,4 +201,28 @@ fn run_source(shell: &Rc<RefCell<Shell>>, content: &str, tolerant: bool) -> Resu
     }
     shell.borrow_mut().env.remove("LINENO");
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_short_flags;
+
+    fn expand(args: &[&str]) -> Vec<String> {
+        expand_short_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn splits_flag_clusters() {
+        assert_eq!(expand(&["-lic", "echo -li"]), ["-l", "-i", "-c", "echo -li"]);
+        assert_eq!(expand(&["-ci", "cmd"]), ["-i", "-c", "cmd"]);
+        assert_eq!(expand(&["-l", "-ic", "cmd"]), ["-l", "-i", "-c", "cmd"]);
+    }
+
+    #[test]
+    fn leaves_other_args_alone() {
+        assert_eq!(expand(&["--login", "-V"]), ["--login", "-V"]);
+        assert_eq!(expand(&["script.sh", "-lic"]), ["script.sh", "-lic"]);
+        assert_eq!(expand(&["-c", "x", "-li"]), ["-c", "x", "-li"]);
+        assert_eq!(expand(&["-lx"]), ["-lx"]);
+    }
 }

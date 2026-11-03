@@ -54,6 +54,7 @@ fn main() -> Result<()> {
     //   jaksh -V / --version           → in version rồi exit
     //   jaksh -h / --help              → in help rồi exit
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = config::expand_short_flags(&args);
     let mode = parse_cli(&args);
     match mode {
         CliMode::Help => {

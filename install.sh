@@ -250,7 +250,13 @@ fi
 
 # ─── 6) Cài binary ────────────────────────────────────────────────────────────
 mkdir -p "$PREFIX"
-cp -f "$BIN" "$PREFIX/jaksh"
+# Không `cp -f` đè lên file cũ: trên macOS (Apple Silicon) kernel còn cache chữ ký
+# của inode cũ → mọi lần chạy jaksh treo ở dyld. Xoá trước để có inode mới.
+rm -f "$PREFIX/jaksh"
+cp "$BIN" "$PREFIX/jaksh"
+if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$PREFIX/jaksh" 2>/dev/null || true
+fi
 ok "Đã cài: ${B}$PREFIX/jaksh${X}"
 
 # Lưu đường dẫn source repo để `jak self-update` biết nơi cần `git pull` sau này.
